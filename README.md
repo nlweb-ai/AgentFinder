@@ -1,21 +1,14 @@
 # WHO Standalone Handler
 
-A high-performance, modular service for finding the most relevant sites to answer user queries. This standalone implementation supports both REST and MCP (Model Context Protocol) interfaces with swappable search and LLM backends.
+A high-performance, modular service for finding the most relevant agents to answer user queries. This standalone implementation supports both REST and MCP (Model Context Protocol) interfaces with swappable search and LLM backends.
 
-## Features
 
-- **Fast Response Times**: < 3 seconds for cold queries, < 100ms for cached queries
-- **High Concurrency**: Supports up to 50 concurrent requests
-- **Intelligent Caching**: Multi-level caching for embeddings, search results, and rankings
-- **Swappable Backends**: Easy to replace Azure Search or Azure OpenAI with other providers
-- **Dual Protocol Support**: Both REST API and MCP protocol
-- **Production Ready**: Health checks, statistics, graceful shutdown
 
 ## Architecture
 
 The system is composed of 4 modular Python files:
 
-- **`server.py`**: Web server with REST and MCP endpoints
+- **`agent_finder.py`**: Web server with REST and MCP endpoints
 - **`who_handler.py`**: Core orchestration logic with caching
 - **`search_backend.py`**: Swappable search interface (Azure Search, Elasticsearch, etc.)
 - **`llm_backend.py`**: Swappable LLM interface (Azure OpenAI, OpenAI, Anthropic, etc.)
@@ -43,7 +36,7 @@ export LLM_ENDPOINT="https://your-openai.openai.azure.com"
 export LLM_API_KEY="your-llm-api-key"
 export LLM_MODEL="gpt-4"
 export LLM_EMBEDDING_MODEL="text-embedding-3-large"
-export LLM_MAX_CONCURRENT=25
+export LLM_MAX_CONCURRENT=50
 
 # Optional: Server Configuration
 export WHO_SERVER_PORT=8080
@@ -52,14 +45,14 @@ export WHO_SERVER_HOST=0.0.0.0
 # Optional: WHO Handler Settings
 export WHO_SCORE_THRESHOLD=70
 export WHO_MAX_RESULTS=10
-export WHO_SEARCH_TOP_K=30
+export WHO_SEARCH_TOP_K=50
 export WHO_CACHE_TTL=3600
 ```
 
 ### 3. Run the Server
 
 ```bash
-python server.py
+python agent_finder.py
 ```
 
 The server will start on `http://localhost:8080` by default.
@@ -172,14 +165,14 @@ curl -X POST http://localhost:8080/clear-cache
 | `LLM_API_KEY` | LLM service API key | Required |
 | `LLM_MODEL` | LLM model name | `gpt-4` |
 | `LLM_EMBEDDING_MODEL` | Embedding model name | `text-embedding-3-large` |
-| `LLM_MAX_CONCURRENT` | Max concurrent LLM calls | `25` |
+| `LLM_MAX_CONCURRENT` | Max concurrent LLM calls | `50` |
 | **Server** | | |
 | `WHO_SERVER_PORT` | Server port | `8080` |
 | `WHO_SERVER_HOST` | Server host | `0.0.0.0` |
 | **WHO Handler** | | |
 | `WHO_SCORE_THRESHOLD` | Min score to include site | `70` |
 | `WHO_MAX_RESULTS` | Max results to return | `10` |
-| `WHO_SEARCH_TOP_K` | Sites to retrieve from search | `30` |
+| `WHO_SEARCH_TOP_K` | Sites to retrieve from search | `50` |
 | `WHO_CACHE_TTL` | Cache TTL in seconds | `3600` |
 | `WHO_MAX_CACHE_ENTRIES` | Max search cache entries | `10000` |
 | `WHO_RANKING_CACHE_ENTRIES` | Max ranking cache entries | `100000` |
@@ -364,7 +357,7 @@ server {
 
 ## License
 
-This is a standalone implementation for the WHO handler functionality.
+This is a standalone implementation for the WHO handler functionality is made available under the MIT License
 
 ## Support
 
