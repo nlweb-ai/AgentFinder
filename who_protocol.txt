@@ -1,0 +1,1424 @@
+Who Protocol Specification
+Version: 0.1 (Draft)
+ Date: January 2026
+ Status: Proposal
+
+Abstract
+Who is a discovery service for capability augments—MCP tools, A2A agents, skills, and other callable services that extend the capabilities of large language models. Given a natural language query, Who returns a ranked list of augments suited to handle the request, along with sufficient information to invoke each one.
+Who can be invoked as a service, enabling any LLM-powered system to dynamically discover and utilize relevant capabilities without requiring users to pre-install them.
+
+1. Motivation
+LLMs increasingly rely on external "capability augments"—MCP tools, skills, or the ability to invoke other agents—to extend their functionality. In this document, we refer to these generically as augments.
+Today's approach to augments faces fundamental challenges in discovery and selection: how does an LLM find relevant augments, and how does it choose among them?
+1.1 The Selection Problem
+The prevailing model requires users to explicitly "install" each augment before use. For each request, the LLM then selects from installed augments and composes invocations based on their schema descriptions. This approach encounters serious scaling limitations:
+The installation model is ill-suited to the task. We will see thousands—likely millions—of augments, especially agents. Requiring users to install agents before use replicates the mobile app store paradigm rather than the open web. It is analogous to requiring users to bookmark a URL before they can visit it, rather than discovering it through search. On the web, search enables users to find relevant sites for one-time needs far more effectively than curated bookmark lists. We need a similar model for augments: one where LLMs can draw from an open repository without requiring pre-installation.
+
+
+Augment descriptions lack sufficient detail for accurate selection. Agent descriptions tend to be generic and omit the information needed for precise matching—a problem that intensifies as augments compete for usage. Effective selection requires richer signals: representative queries the augment handles well (or poorly), domain expertise indicators, and success patterns. However, embedding this information in prompts only exacerbates the context window problem.
+
+
+Context-based selection does not scale. Most LLMs select tools by including tool descriptions in the context window, which incurs quadratic computational cost and cannot accommodate thousands of tools. Recent work on hierarchical tool directories offers modest improvements, but falls far short of the two to three orders of magnitude gains required to scale from dozens of tools to tens of thousands.
+
+
+1.2 Solving the Selection Problem
+Who addresses these challenges by providing a dedicated discovery service—essentially a search engine over augments that LLMs can query. The interaction flow is straightforward: a user poses a question through any chat interface, the orchestrating system consults Who, and Who returns relevant augments ranked by suitability.
+This architecture resolves each of the problems identified above:
+Shared index instead of individual installation. Rather than requiring each user to maintain their own collection of installed augments, Who maintains a shared, continuously updated index—analogous to how web search engines index the web. Augments become discoverable the moment they are indexed, without any action required from end users.
+
+
+Rich ranking signals beyond descriptions. By relocating selection logic from the LLM to a specialized search service, Who can leverage decades of information retrieval research. For instance, rather than relying solely on augment descriptions, the index can incorporate representative queries where each augment excels or underperforms. Centralizing selection requests also enables continuous improvement based on aggregate usage patterns.
+
+
+Scalability unconstrained by context windows. Once selection moves outside the LLM, context window limitations no longer apply. Search engines scale sublinearly and routinely operate over tens of billions of documents. Combined with hybrid scoring techniques that reserve LLM-based evaluation for final ranking, this achieves high precision without incurring the full cost of LLM inference. The key insight is that augment selection is fundamentally a ranking problem—one that does not require the full generality of language models.
+
+
+
+2. Protocol Overview
+Who exposes a single primary operation: who.
+Given a natural language query, who returns a ranked list of augments capable of handling the request. Each result includes sufficient information for the caller to invoke the augment directly.
+The protocol is transport-neutral. While this specification uses HTTP for its primary examples, the core JSON structures remain identical whether transmitted via HTTP, MCP, WebSockets, or other transports.
+
+3. Request Structure
+A request to Who consists of two sections: query (required) and meta (optional).
+3.1 Query (Required)
+Specifies the user's need for which suitable augments are being sought.
+Attributes:
+Attribute
+Required
+Description
+text
+Yes
+Natural language description of the need
+type
+No
+Filter by augment type (e.g., "MCPTool", "A2AAgent", "Skill")
+domain
+No
+Filter by domain (e.g., "recipes", "travel", "finance")
+capabilities
+No
+Array of required capabilities (e.g., ["payments", "reservations"])
+
+Example — Finding an agent:
+{
+  "query": {
+    "text": "where can I buy running shoes for marathon training?",
+    "type": "A2AAgent"
+  }
+}
+
+Example — Finding a skill:
+{
+  "query": {
+    "text": "I need to create a professional presentation",
+    "type": "Skill"
+  }
+}
+
+3.2 Meta (Optional)
+Contains metadata governing the request.
+Attributes:
+Attribute
+Required
+Description
+version
+No
+Protocol version number
+request_id
+No
+Client-provided request identifier for tracing
+max_results
+No
+Maximum number of results to return (default: 10)
+
+Example:
+{
+  "meta": {
+    "version": "0.1",
+    "max_results": 5
+  }
+}
+
+3.3 Complete Request Example
+{
+  "query": {
+    "text": "I need to find vegetarian Indian recipes"
+  },
+  "meta": {
+    "version": "0.1",
+    "max_results": 10
+  }
+}
+
+
+4. Response Structure
+Responses include a required _meta object and content appropriate to the response type.
+4.1 _meta (Required)
+Metadata describing the response.
+Attributes:
+Attribute
+Required
+Description
+response_type
+Yes
+Either answer or failure
+version
+Yes
+Protocol version number
+result_count
+No
+Number of augments returned
+
+4.2 Results Array
+For successful responses, the results array contains augment objects ranked by relevance to the query.
+Each augment object includes protocol, endpoint, score, and definition fields. The definition contains protocol-specific metadata (A2A Agent Cards, MCP tool definitions, etc.) as described in Section 5.
+4.3 Referrals Array
+Responses MAY include a referrals array containing pointers to other Who servers that might have additional relevant results. See Section 11 for details on federation and referrals.
+
+5. Augment Types and Invocation
+Who responses use two fields to describe how to invoke an augment:
+protocol — Identifies the transport protocol
+definition — Contains the protocol-specific metadata (native format)
+5.1 Protocol Field
+The protocol field identifies the transport protocol:
+Protocol
+Description
+mcp
+MCP server (connect and call tools via MCP)
+a2a
+A2A agent (send tasks via A2A protocol)
+openapi
+OpenAPI service (invoke per OpenAPI spec)
+skill
+Agent Skill (load into agent context per agentskills.io)
+http
+Custom HTTP endpoint
+
+5.2 Definition Field
+The definition field contains the native metadata format for the protocol. This allows direct embedding of A2A Agent Cards, MCP tool definitions, and other protocol-specific structures.
+MCP Servers:
+{
+  "protocol": "mcp",
+  "endpoint": "mcp://weather.example.com",
+  "score": 88,
+  "definition": {
+    "name": "Weather Service",
+    "description": "Current conditions and forecasts",
+    "tools": [
+      {
+        "name": "get_current_weather",
+        "description": "Get current weather for a location",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "location": { "type": "string" }
+          },
+          "required": ["location"]
+        }
+      }
+    ]
+  }
+}
+
+The definition.tools array follows the MCP tool definition format from tools/list.
+A2A Agents:
+{
+  "protocol": "a2a",
+  "endpoint": "https://example.com/.well-known/agent.json",
+  "score": 85,
+  "definition": {
+    "name": "Travel Concierge",
+    "description": "AI-powered travel planning",
+    "url": "https://example.com/a2a",
+    "version": "1.0.0",
+    "capabilities": {
+      "streaming": true,
+      "pushNotifications": true
+    },
+    "skills": [
+      {
+        "id": "plan_trip",
+        "name": "Trip Planning",
+        "description": "Create travel itineraries",
+        "examples": ["plan a trip to Japan"]
+      }
+    ]
+  }
+}
+
+The definition field contains a native A2A Agent Card.
+OpenAPI Services:
+{
+  "protocol": "openapi",
+  "endpoint": "https://api.example.com",
+  "score": 80,
+  "definition": {
+    "name": "Inventory API",
+    "description": "Product inventory management",
+    "specUrl": "https://api.example.com/openapi.json"
+  }
+}
+
+Custom HTTP Endpoints:
+{
+  "protocol": "http",
+  "endpoint": "https://legacy.example.com/api/query",
+  "score": 75,
+  "definition": {
+    "name": "Legacy Inventory",
+    "description": "Query legacy inventory system",
+    "method": "POST",
+    "contentType": "application/json",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sku": { "type": "string" }
+      },
+      "required": ["sku"]
+    }
+  }
+}
+
+Agent Skills:
+Agent Skills are procedural knowledge packages that teach agents how to perform specific tasks. Unlike callable endpoints (MCP, A2A, etc.), skills are loaded into the agent's context to guide behavior. The endpoint points to the skill package location (a folder containing SKILL.md and optional resources).
+{
+  "protocol": "skill",
+  "endpoint": "https://skills.example.com/pptx-creator",
+  "score": 89,
+  "definition": {
+    "name": "pptx-creator",
+    "description": "Create professional PowerPoint presentations following brand guidelines. Use when asked to make slides, presentations, or pitch decks.",
+    "license": "MIT",
+    "compatibility": "python3, python-pptx",
+    "metadata": {
+      "author": "example-org",
+      "version": "1.2.0",
+      "tags": ["presentations", "documents", "office"]
+    }
+  }
+}
+
+The definition field contains the YAML frontmatter from the skill's SKILL.md file, converted to JSON. This follows the Agent Skills specification:
+Field
+Description
+name
+Skill identifier (max 64 chars, lowercase, hyphens allowed)
+description
+What the skill does and when to use it (max 1024 chars)
+license
+License name or reference
+compatibility
+Environment requirements
+allowed-tools
+Pre-approved tools the skill may use
+metadata
+Arbitrary key-value pairs (author, version, tags, etc.)
+
+5.3 Augment Object Fields
+Common Fields (all protocols):
+Field
+Required
+Description
+protocol
+Yes
+Transport protocol (see 5.1)
+endpoint
+Yes
+Service endpoint URL (or skill package URL for skills)
+score
+Yes
+Relevance score (0-100)
+definition
+Yes
+Protocol-specific metadata (native format)
+source
+No
+URL of the Who server that provided this result (see Section 11)
+
+Definition Field Contents by Protocol:
+Protocol
+definition Contains
+mcp
+MCP server info + tools array (per tools/list)
+a2a
+Native A2A Agent Card
+openapi
+OpenAPI spec reference
+skill
+Agent Skill frontmatter (per agentskills.io spec)
+http
+Custom HTTP invocation details
+
+
+6. Response Types
+6.1 Answer
+A successful response with ranked augments.
+{
+  "_meta": {
+    "response_type": "answer",
+    "version": "0.1",
+    "result_count": 4
+  },
+  "results": [
+    {
+      "protocol": "a2a",
+      "endpoint": "https://hebbarskitchen.com/.well-known/agent.json",
+      "score": 95,
+      "definition": {
+        "name": "Hebbars Kitchen",
+        "description": "Comprehensive Indian vegetarian recipes with video tutorials",
+        "url": "https://hebbarskitchen.com/a2a",
+        "capabilities": { "streaming": true },
+        "skills": [
+          {
+            "id": "recipe_search",
+            "name": "Recipe Search",
+            "description": "Find recipes by ingredients or cuisine",
+            "examples": ["paneer recipes", "South Indian breakfast"]
+          }
+        ]
+      }
+    },
+    {
+      "protocol": "openapi",
+      "endpoint": "https://api.tarladalal.com",
+      "score": 91,
+      "definition": {
+        "name": "Tarla Dalal",
+        "description": "Large collection of Indian vegetarian recipes",
+        "specUrl": "https://api.tarladalal.com/openapi.json"
+      }
+    },
+    {
+      "protocol": "skill",
+      "endpoint": "https://skills.anthropic.com/recipe-formatter",
+      "score": 87,
+      "definition": {
+        "name": "recipe-formatter",
+        "description": "Format recipes with consistent structure, convert units, and calculate nutritional information. Use when asked to organize, format, or enhance recipe content.",
+        "license": "Apache-2.0",
+        "metadata": {
+          "author": "anthropic",
+          "version": "2.0.0"
+        }
+      }
+    },
+    {
+      "protocol": "mcp",
+      "endpoint": "mcp://recipes.example.com",
+      "score": 84,
+      "definition": {
+        "name": "Recipe Tools",
+        "description": "Recipe search and meal planning tools",
+        "tools": [
+          {
+            "name": "search_recipes",
+            "description": "Search recipes by criteria",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "query": { "type": "string" },
+                "cuisine": { "type": "string" }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
+
+6.2 Failure
+An error response.
+{
+  "_meta": {
+    "response_type": "failure",
+    "version": "0.1"
+  },
+  "error": {
+    "code": "INVALID_QUERY",
+    "message": "Query text is required"
+  }
+}
+
+Standard Error Codes:
+Code
+Description
+INVALID_QUERY
+Malformed or missing query
+NO_RESULTS
+No matching augments found
+RATE_LIMITED
+Too many requests
+INTERNAL_ERROR
+Service error
+
+
+7. HTTP Binding
+This section defines how Who maps to standard HTTP.
+7.1 Endpoint
+POST /who
+
+7.2 Request
+POST /who HTTP/1.1
+Host: who.example.com
+Content-Type: application/json
+
+{
+  "query": {
+    "text": "I need to book a restaurant in San Francisco"
+  },
+  "meta": {
+    "version": "0.1",
+    "max_results": 5
+  }
+}
+
+7.3 Response
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "_meta": {
+    "response_type": "answer",
+    "version": "0.1",
+    "result_count": 3
+  },
+  "results": [
+    {
+      "protocol": "a2a",
+      "endpoint": "https://opentable.com/.well-known/agent.json",
+      "score": 96,
+      "definition": {
+        "name": "OpenTable",
+        "description": "Restaurant reservations and reviews",
+        "url": "https://opentable.com/a2a",
+        "skills": [
+          {
+            "id": "find_restaurant",
+            "name": "Find Restaurant",
+            "description": "Search for restaurants by location and cuisine",
+            "examples": ["Italian restaurants in SF", "romantic dinner spots"]
+          }
+        ]
+      }
+    },
+    {
+      "protocol": "openapi",
+      "endpoint": "https://api.resy.com",
+      "score": 93,
+      "definition": {
+        "name": "Resy",
+        "description": "Restaurant discovery and reservations",
+        "specUrl": "https://api.resy.com/openapi.json"
+      }
+    },
+    {
+      "protocol": "a2a",
+      "endpoint": "https://maps.google.com/.well-known/agent.json",
+      "score": 85,
+      "definition": {
+        "name": "Google Maps",
+        "description": "Restaurant search with reviews and directions",
+        "capabilities": { "streaming": true },
+        "skills": [
+          {
+            "id": "place_search",
+            "name": "Place Search",
+            "description": "Find places by type and location"
+          }
+        ]
+      }
+    }
+  ]
+}
+
+
+8. MCP Binding
+Who can be exposed as an MCP tool, enabling LLMs to discover augments through the same protocol they use to invoke them.
+8.1 Tool Definition
+{
+  "name": "who",
+  "description": "Find agents, tools, and services that can help answer a query. Returns ranked augments with invocation details.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "object",
+        "description": "The query specifying what augments are needed",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Natural language description of the need"
+          },
+          "type": {
+            "type": "string",
+            "description": "Filter by augment type"
+          },
+          "domain": {
+            "type": "string",
+            "description": "Filter by domain"
+          }
+        },
+        "required": ["text"]
+      },
+      "meta": {
+        "type": "object",
+        "description": "Request metadata",
+        "properties": {
+          "version": { "type": "string" },
+          "max_results": { "type": "integer" }
+        }
+      }
+    },
+    "required": ["query"]
+  }
+}
+
+8.2 Example Interaction
+Request:
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "who",
+    "arguments": {
+      "query": {
+        "text": "I need to check the weather in Tokyo"
+      }
+    }
+  }
+}
+
+Response:
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Found 2 augments that can help with weather information"
+      }
+    ],
+    "_meta": {
+      "response_type": "answer",
+      "version": "0.1"
+    },
+    "results": [
+      {
+        "protocol": "mcp",
+        "endpoint": "mcp://weather.example.com",
+        "score": 97,
+        "definition": {
+          "name": "Weather Service",
+          "description": "Current weather conditions and forecasts",
+          "tools": [
+            {
+              "name": "get_weather",
+              "description": "Get weather for a location",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "location": { "type": "string" }
+                },
+                "required": ["location"]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "protocol": "a2a",
+        "endpoint": "https://weather.com/.well-known/agent.json",
+        "score": 94,
+        "definition": {
+          "name": "Weather.com",
+          "description": "Detailed weather information and forecasts",
+          "url": "https://weather.com/a2a",
+          "skills": [
+            {
+              "id": "forecast",
+              "name": "Weather Forecast",
+              "description": "Get current conditions and forecasts for any location"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+
+
+9. Integration Patterns
+This section illustrates common patterns for integrating Who into orchestration systems.
+9.1 Basic Discovery Flow
+A typical single-augment interaction proceeds as follows:
+User asks: "Find me a good Italian restaurant nearby"
+Orchestrator calls Who with the query
+Who returns ranked augments (e.g., OpenTable, Yelp, Google Maps)
+Orchestrator selects the top-ranked result
+Orchestrator invokes the selected augment using the provided endpoint and protocol
+Response is returned to the user
+9.2 Multi-Augment Composition
+For queries requiring multiple capabilities, the orchestrator may issue multiple discovery requests:
+User asks: "Plan a dinner date—find a restaurant and book a car"
+Orchestrator calls Who for restaurant reservation capabilities
+Orchestrator calls Who for car service capabilities
+Orchestrator invokes both augments and composes the results
+9.3 Fallback Handling
+When the top-ranked augment fails or returns unsatisfactory results, the orchestrator can fall back to lower-ranked alternatives:
+Orchestrator invokes the top-ranked augment
+Augment returns a failure or inadequate results
+Orchestrator invokes the second-ranked augment
+Process continues until a satisfactory result is obtained or all candidates are exhausted
+
+10. Security Considerations
+10.1 Augment Verification
+Callers SHOULD verify augment endpoints before invocation. Who indexes augments but does not guarantee their security, authenticity, or availability. Callers are responsible for establishing appropriate trust before invoking returned augments.
+10.2 Input Validation
+Callers MUST validate that their requests conform to any inputSchema specified in custom invocation details. Malformed requests may produce unexpected behavior or security vulnerabilities.
+10.3 Rate Limiting
+Who implementations SHOULD enforce rate limiting to prevent abuse and ensure fair access across clients.
+
+11. Federation
+Who servers can be organized hierarchically, analogous to DNS. This enables local resolution, policy enforcement, and trust differentiation across organizational boundaries.
+11.1 Hierarchical Resolution
+A typical deployment might include:
+Local Who server — An enterprise-operated instance that indexes internal agents (expense tools, knowledge bases, proprietary services). This is the first resolver consulted.
+
+
+Upstream Who server — A broader service indexing publicly available agents. The local instance delegates to this when it cannot satisfy a query internally.
+
+
+Root Who servers — Analogous to DNS root servers, these are well-known public Who servers that provide comprehensive or curated indexes. Multiple root Who servers may exist, differentiated by coverage, trust policies, or domain specialization.
+
+
+11.2 Trust and Policy
+Hierarchical deployment enables several trust and policy patterns:
+Curation — An enterprise Who server can restrict results to agents that meet compliance requirements (HIPAA, SOC2, GDPR).
+Prioritization — Internal agents can be ranked higher than external alternatives for equivalent capabilities.
+Blocking — Certain agents or categories can be excluded based on organizational policy.
+Provenance — Results can indicate which Who server vouched for them, enabling callers to make trust decisions.
+11.3 Source Attribution
+Each result in the results array MAY include a source field indicating which Who server provided the result. This enables callers to understand provenance and make trust decisions.
+Source Field:
+Field
+Type
+Description
+source
+string
+URL of the Who server that provided this result
+
+Example:
+{
+  "results": [
+    {
+      "protocol": "mcp",
+      "endpoint": "mcp://internal.example.com/expense",
+      "score": 98,
+      "source": "https://who.example.com",
+      "definition": {
+        "name": "Internal Expense Tool",
+        "description": "Corporate expense reporting and reimbursement",
+        "tools": [
+          {
+            "name": "submit_expense",
+            "description": "Submit an expense report",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "amount": { "type": "number" },
+                "category": { "type": "string" }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "protocol": "a2a",
+      "endpoint": "https://expensify.com/.well-known/agent.json",
+      "score": 91,
+      "source": "https://who.nlweb.ai",
+      "definition": {
+        "name": "Expensify",
+        "description": "Expense management and receipt tracking",
+        "url": "https://expensify.com/a2a",
+        "skills": [
+          {
+            "id": "track_expense",
+            "name": "Expense Tracking",
+            "description": "Track and categorize expenses"
+          }
+        ]
+      }
+    }
+  ]
+}
+
+In this example, the first result was provided by the enterprise's local Who server, while the second came from a public upstream service.
+11.4 Referrals
+When a Who server cannot fully satisfy a query, it MAY return referrals to other Who servers that might have relevant results. This is analogous to DNS referrals.
+Referrals appear in a referrals array alongside (or instead of) results. Each referral identifies another Who server and optionally describes its specialization.
+Referral Object:
+Field
+Required
+Description
+endpoint
+Yes
+URL of the referred Who server
+name
+No
+Human-readable name of the Who server
+description
+No
+Specialization or coverage description
+confidence
+No
+Estimated likelihood of relevant results (0-100)
+
+Example — Partial Results with Referrals:
+{
+  "_meta": {
+    "response_type": "answer",
+    "version": "0.1",
+    "result_count": 1
+  },
+  "results": [
+    {
+      "protocol": "mcp",
+      "endpoint": "mcp://internal.example.com/health",
+      "score": 85,
+      "source": "https://who.example.com",
+      "definition": {
+        "name": "Internal Health Portal",
+        "description": "Employee health benefits and wellness programs",
+        "tools": [
+          {
+            "name": "check_benefits",
+            "description": "Look up employee health benefit details"
+          }
+        ]
+      }
+    }
+  ],
+  "referrals": [
+    {
+      "endpoint": "https://who.nlweb.ai/who",
+      "name": "Public Who Server",
+      "description": "Comprehensive index of public augments",
+      "confidence": 80
+    },
+    {
+      "endpoint": "https://health.who.example/who",
+      "name": "Healthcare Who Server",
+      "description": "Curated index of HIPAA-compliant healthcare agents",
+      "confidence": 95
+    }
+  ]
+}
+
+Example — Referral Only (No Local Results):
+{
+  "_meta": {
+    "response_type": "answer",
+    "version": "0.1",
+    "result_count": 0
+  },
+  "results": [],
+  "referrals": [
+    {
+      "endpoint": "https://who.nlweb.ai/who",
+      "name": "Public Who Server",
+      "description": "Comprehensive index of public augments"
+    }
+  ]
+}
+
+11.5 Resolution Behavior
+Who implementations have discretion in how they handle upstream delegation:
+Transparent delegation — The local Who server queries upstream services automatically and merges results before responding. Callers see a unified result set with source fields indicating provenance.
+
+
+Referral-based delegation — The local Who server returns its own results plus referrals, leaving the caller to query upstream services directly.
+
+
+Hybrid — The local Who server may transparently delegate to trusted upstream services while returning referrals for others.
+
+
+The choice depends on factors such as latency requirements, trust relationships, and policy constraints.
+
+12. Discovery
+This section addresses how augments are discovered and entered into Who indexes. Just as the web has distinct mechanisms for discovery—DNS for hosts, sitemaps for pages, robots.txt for crawler directives—the agent ecosystem requires analogous mechanisms for advertising capabilities.
+We deliberately decouple discovery from the /who protocol. The /who operation queries an index; discovery populates that index. Different deployment contexts will use different discovery mechanisms:
+Public web: Sites advertise their agentic capabilities via well-known files and sitemap-like indexes, which Who servers can crawl.
+Enterprise: Organizations may use internal registries, service meshes, or configuration management systems to register agents.
+Federated: Upstream Who servers may aggregate and republish indexes from downstream sources.
+This section specifies the discovery mechanism for the public web. Enterprise and federated discovery are implementation-specific and outside the scope of this specification.
+12.1 Design Principles
+The discovery mechanism follows these principles:
+Alignment with existing standards: We build on established patterns (robots.txt, sitemaps, .well-known URIs) and align with emerging agent protocols (A2A Agent Cards, MCP) where possible.
+
+
+Declarative, not prescriptive: Sites declare what capabilities they offer; Who servers decide what to index.
+
+
+Incremental adoption: Sites can advertise a single agent with minimal effort, or publish comprehensive indexes with rich metadata.
+
+
+Protocol diversity: The mechanism supports multiple augment types (MCP servers, A2A agents, OpenAPI services, Agent Skills) through a unified discovery format.
+
+
+12.2 Terminology
+We introduce the term Capability Manifest as the general name for a machine-readable document that describes one or more capabilities offered by a site. A Capability Manifest can describe:
+MCP servers and tools
+A2A agents
+OpenAPI services
+Agent Skills
+Other callable augments
+The term is deliberately broad, encompassing what A2A calls "Agent Cards" and what MCP discussions have termed "server manifests." A Capability Manifest is to augments what a sitemap is to pages—a declaration of what exists and how to access it.
+12.3 Discovery Mechanisms
+Who servers can discover Capability Manifests through three complementary mechanisms:
+1. Well-Known URI
+Sites MAY publish a Capability Manifest at:
+https://{domain}/.well-known/capability-manifest.json
+
+This provides a predictable location for single-agent sites or as a canonical entry point.
+2. robots.txt Directive
+Sites MAY advertise Capability Manifests via a directive in robots.txt:
+User-agent: *
+Disallow: /private/
+
+Sitemap: https://example.com/sitemap.xml
+Agentmap: https://example.com/agents/manifest.json
+
+The Agentmap directive follows the same conventions as Sitemap:
+Case-insensitive directive name
+Absolute URL value
+Multiple directives permitted
+This approach supports sites with multiple Capability Manifests or non-standard locations.
+3. HTML Meta Tag
+Sites MAY include a link to their Capability Manifest in HTML pages:
+<link rel="capability-manifest" href="https://example.com/agents/manifest.json">
+
+This enables discovery during web crawling and supports sites where robots.txt modification is not feasible.
+12.4 Capability Manifest Format
+The Capability Manifest is a JSON document describing one or more capabilities offered by a site. The format cleanly separates the protocol type from protocol-specific metadata, allowing native embedding of A2A Agent Cards, MCP tool definitions, Agent Skills, and other protocol-specific structures.
+12.4.1 Top-Level Structure
+{
+  "@context": "https://nlweb.ai/schemas/manifest/v0.1",
+  "name": "Example Corp Services",
+  "description": "AI-accessible services provided by Example Corp",
+  "url": "https://example.com",
+  "version": "1.0.0",
+  "provider": {
+    "name": "Example Corp",
+    "url": "https://example.com/about"
+  },
+  "capabilities": [
+    { ... }
+  ]
+}
+
+12.4.2 Manifest Fields
+Top-Level Fields:
+Field
+Required
+Description
+@context
+Yes
+Schema reference: "https://nlweb.ai/schemas/manifest/v0.1"
+name
+Yes
+Human-readable name of the site or organization
+description
+No
+Brief description of the services offered
+url
+No
+Homepage URL
+version
+No
+Manifest version (for change detection)
+provider
+No
+Organization providing the capabilities
+capabilities
+Yes
+Array of capability definitions
+
+Provider Object:
+Field
+Required
+Description
+name
+Yes
+Organization name
+url
+No
+Organization URL
+contactEmail
+No
+Contact email for the provider
+
+12.4.3 Capability Entry
+Each entry in the capabilities array has three required fields:
+Field
+Required
+Description
+protocol
+Yes
+Protocol type: mcp, a2a, openapi, skill, http
+endpoint
+Yes
+Service endpoint URL (or skill package URL for skills)
+definition
+Yes
+Protocol-specific definition (native format)
+
+The definition field contains the native format for that protocol—an A2A Agent Card, MCP tools list, Agent Skill frontmatter, or other protocol-specific structure.
+12.4.4 Protocol-Specific Definitions
+Protocol: a2a
+For A2A agents, the definition is a native A2A Agent Card:
+{
+  "protocol": "a2a",
+  "endpoint": "https://example.com/.well-known/agent.json",
+  "definition": {
+    "name": "Travel Concierge",
+    "description": "AI-powered travel planning assistant",
+    "url": "https://example.com/a2a",
+    "version": "1.0.0",
+    "capabilities": {
+      "streaming": true,
+      "pushNotifications": true
+    },
+    "defaultInputModes": ["text/plain"],
+    "defaultOutputModes": ["text/plain", "application/json"],
+    "skills": [
+      {
+        "id": "plan_trip",
+        "name": "Trip Planning",
+        "description": "Create comprehensive travel itineraries",
+        "tags": ["planning", "itinerary"],
+        "examples": ["plan a 10-day trip to Japan"]
+      }
+    ]
+  }
+}
+
+The definition object is a valid A2A Agent Card as specified by the A2A protocol.
+Protocol: mcp
+For MCP servers, the definition contains server metadata and the tools array (as returned by tools/list):
+{
+  "protocol": "mcp",
+  "endpoint": "https://api.example.com/mcp",
+  "definition": {
+    "name": "Weather Service",
+    "description": "Weather information and forecasts",
+    "version": "1.0.0",
+    "tools": [
+      {
+        "name": "get_current_weather",
+        "description": "Get current weather conditions for a location",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "location": {
+              "type": "string",
+              "description": "City name or coordinates"
+            },
+            "units": {
+              "type": "string",
+              "enum": ["celsius", "fahrenheit"],
+              "default": "celsius"
+            }
+          },
+          "required": ["location"]
+        }
+      },
+      {
+        "name": "get_forecast",
+        "description": "Get weather forecast for upcoming days",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "location": { "type": "string" },
+            "days": { "type": "integer", "minimum": 1, "maximum": 14 }
+          },
+          "required": ["location"]
+        }
+      }
+    ]
+  }
+}
+
+The definition.tools array follows the MCP tool definition format exactly.
+Protocol: openapi
+For OpenAPI services, the definition references the specification:
+{
+  "protocol": "openapi",
+  "endpoint": "https://api.example.com",
+  "definition": {
+    "specUrl": "https://api.example.com/openapi.json",
+    "name": "Inventory API",
+    "description": "Product inventory management"
+  }
+}
+
+Protocol: http
+For custom HTTP endpoints that don't follow a standard protocol:
+{
+  "protocol": "http",
+  "endpoint": "https://legacy.example.com/api/query",
+  "definition": {
+    "name": "Legacy Inventory",
+    "description": "Query legacy inventory system",
+    "method": "POST",
+    "contentType": "application/json",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sku": { "type": "string" },
+        "warehouse": { "type": "string" }
+      },
+      "required": ["sku"]
+    },
+    "authentication": {
+      "type": "bearer",
+      "description": "Requires API token"
+    }
+  }
+}
+
+
+Protocol: skill
+For Agent Skills (per agentskills.io), the definition contains the YAML frontmatter from the skill's SKILL.md file, converted to JSON:
+{
+  "protocol": "skill",
+  "endpoint": "https://skills.example.com/pptx-creator",
+  "definition": {
+    "name": "pptx-creator",
+    "description": "Create professional PowerPoint presentations following brand guidelines. Use when asked to make slides, presentations, or pitch decks.",
+    "license": "MIT",
+    "compatibility": "python3, python-pptx",
+    "allowed-tools": "Bash(python:*) Read Write",
+    "metadata": {
+      "author": "example-org",
+      "version": "1.2.0",
+      "tags": ["presentations", "documents", "office"]
+    }
+  }
+}
+
+The endpoint for skills points to the skill package location—a folder containing:
+SKILL.md — Required: instructions and metadata
+scripts/ — Optional: executable code
+references/ — Optional: documentation
+assets/ — Optional: templates and resources
+Skill Definition Fields:
+Field
+Required
+Description
+name
+Yes
+Skill identifier (max 64 chars, lowercase, hyphens)
+description
+Yes
+What the skill does and when to use it (max 1024 chars)
+license
+No
+License name or reference
+compatibility
+No
+Environment requirements
+allowed-tools
+No
+Pre-approved tools the skill may use
+metadata
+No
+Arbitrary key-value pairs
+
+12.4.5 Complete Example
+{
+  "@context": "https://nlweb.ai/schemas/manifest/v0.1",
+  "name": "TravelCorp Services",
+  "description": "Comprehensive travel booking and planning services",
+  "url": "https://travelcorp.example.com",
+  "version": "2.1.0",
+  "provider": {
+    "name": "TravelCorp Inc.",
+    "url": "https://travelcorp.example.com/about"
+  },
+  "capabilities": [
+    {
+      "protocol": "openapi",
+      "endpoint": "https://api.travelcorp.example.com/flights",
+      "definition": {
+        "name": "Flight Search API",
+        "description": "Search and compare flights across airlines",
+        "specUrl": "https://api.travelcorp.example.com/flights/openapi.json"
+      }
+    },
+    {
+      "protocol": "mcp",
+      "endpoint": "https://api.travelcorp.example.com/mcp",
+      "definition": {
+        "name": "Booking Tools",
+        "description": "Tools for managing travel bookings",
+        "tools": [
+          {
+            "name": "create_booking",
+            "description": "Create a new flight booking",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "flightId": { "type": "string" },
+                "passengers": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "firstName": { "type": "string" },
+                      "lastName": { "type": "string" }
+                    },
+                    "required": ["firstName", "lastName"]
+                  }
+                }
+              },
+              "required": ["flightId", "passengers"]
+            }
+          },
+          {
+            "name": "cancel_booking",
+            "description": "Cancel an existing booking",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "bookingId": { "type": "string" },
+                "reason": { "type": "string" }
+              },
+              "required": ["bookingId"]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "protocol": "a2a",
+      "endpoint": "https://travelcorp.example.com/.well-known/agent.json",
+      "definition": {
+        "name": "Travel Concierge",
+        "description": "AI-powered travel planning assistant for complex itineraries",
+        "url": "https://travelcorp.example.com/a2a",
+        "version": "1.0.0",
+        "capabilities": {
+          "streaming": true,
+          "pushNotifications": true
+        },
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["text/plain", "application/json"],
+        "skills": [
+          {
+            "id": "plan_trip",
+            "name": "Trip Planning",
+            "description": "Create comprehensive travel itineraries",
+            "tags": ["planning", "itinerary", "travel"],
+            "examples": [
+              "plan a 10-day trip to Japan",
+              "romantic weekend getaway in Europe"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "protocol": "skill",
+      "endpoint": "https://skills.travelcorp.example.com/travel-packing",
+      "definition": {
+        "name": "travel-packing",
+        "description": "Generate packing lists based on destination, weather, trip duration, and activities. Use when asked about what to pack or travel preparation.",
+        "license": "Apache-2.0",
+        "metadata": {
+          "author": "travelcorp",
+          "version": "1.0.0",
+          "tags": ["travel", "packing", "preparation"]
+        }
+      }
+    }
+  ]
+}
+
+12.4.6 Protocol and Definition Summary
+Protocol
+definition Contains
+a2a
+A2A Agent Card (native format per A2A specification)
+mcp
+MCP server info + tools array (native format per MCP tools/list)
+openapi
+OpenAPI spec reference
+skill
+Agent Skill frontmatter (native format per agentskills.io)
+http
+Custom HTTP invocation details
+
+This design allows:
+Direct copy-paste of A2A Agent Cards into the definition field
+Direct embedding of MCP tools/list responses
+Direct embedding of Agent Skill YAML frontmatter (as JSON)
+Preservation of protocol-specific fields without transformation
+12.5 Indexing Considerations
+Who servers processing Capability Manifests SHOULD:
+Validate the manifest against the schema before indexing.
+
+
+Extract skills/tools for search — Index individual skills (A2A) or tools (MCP) with their descriptions and examples to enable fine-grained matching.
+
+
+Respect robots.txt — Honor any crawl restrictions specified in robots.txt.
+
+
+Track freshness — Use the version field and HTTP caching headers to detect changes.
+
+
+Verify endpoints — Optionally probe endpoints to verify availability before indexing.
+
+
+Who servers MAY augment manifest data with additional signals (query logs, success rates, user feedback) to improve ranking.
+
+Appendix A: Schema Definitions
+Type schemas referenced by @context are published at:
+https://nlweb.ai/schemas/agents/v0.1/
+
+Core Protocol Types (defined by this specification):
+https://nlweb.ai/schemas/agents/v0.1/MCPServer.json
+https://nlweb.ai/schemas/agents/v0.1/MCPTool.json
+https://nlweb.ai/schemas/agents/v0.1/OpenAPIService.json
+https://nlweb.ai/schemas/agents/v0.1/A2AAgent.json
+https://nlweb.ai/schemas/agents/v0.1/AgentSkill.json
+Example Domain Types (illustrative; additional types may be defined via the extensibility mechanism):
+https://nlweb.ai/schemas/agents/v0.1/MapsAgent.json
+https://nlweb.ai/schemas/agents/v0.1/RecipeAgent.json
+Capability Manifest Schema:
+https://nlweb.ai/schemas/manifest/v0.1/capability-manifest.json
+External Specifications:
+Agent Skills follow the Agent Skills specification. The definition field for skills contains the YAML frontmatter from SKILL.md converted to JSON.
+
+Appendix B: Complete Examples
+B.1 Finding an MCP Tool
+Request:
+{
+  "query": {
+    "text": "I need to read a PDF file",
+    "type": "MCPTool"
+  },
+  "meta": {
+    "max_results": 3
+  }
+}
+
+Response:
+{
+  "_meta": {
+    "response_type": "answer",
+    "version": "0.1",
+    "result_count": 2
+  },
+  "results": [
+    {
+      "@type": "MCPTool",
+      "name": "pdf_reader",
+      "server": "mcp://documents.example.com",
+      "tool": "read_pdf",
+      "score": 94,
+      "description": "Extract text and metadata from PDF files"
+    },
+    {
+      "@type": "MCPTool",
+      "name": "document_parser",
+      "server": "mcp://parsing.example.com",
+      "tool": "parse_document",
+      "score": 87,
+      "description": "Parse various document formats including PDF"
+    }
+  ]
+}
+
+B.2 Custom Invocation
+Request:
+{
+  "query": {
+    "text": "check inventory levels for SKU 12345"
+  }
+}
+
+Response:
+{
+  "_meta": {
+    "response_type": "answer",
+    "version": "0.1",
+    "result_count": 1
+  },
+  "results": [
+    {
+      "@type": "Agent",
+      "name": "Warehouse Inventory Service",
+      "score": 91,
+      "description": "Real-time inventory levels across all warehouses",
+      "invocation": {
+        "protocol": "https",
+        "method": "POST",
+        "endpoint": "https://inventory.example.com/api/v2/check",
+        "contentType": "application/json",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "sku": {
+              "type": "string",
+              "description": "Product SKU"
+            },
+            "warehouse_id": {
+              "type": "string",
+              "description": "Optional warehouse filter"
+            }
+          },
+          "required": ["sku"]
+        },
+        "authentication": {
+          "type": "bearer",
+          "description": "Requires API token in Authorization header"
+        }
+      }
+    }
+  ]
+}
+
+B.3 Federated Resolution with Referrals
+An enterprise Who server returns internal results and referrals to upstream services.
+Request:
+{
+  "query": {
+    "text": "I need to book a flight to Tokyo"
+  },
+  "meta": {
+    "max_results": 5
+  }
+}
+
+Response:
+{
+  "_meta": {
+    "response_type": "answer",
+    "version": "0.1",
+    "result_count": 1
+  },
+  "results": [
+    {
+      "protocol": "a2a",
+      "endpoint": "https://travel.internal.example.com/.well-known/agent.json",
+      "score": 95,
+      "definition": {
+        "name": "Corporate Travel Portal",
+        "description": "Book flights using corporate negotiated rates and travel policy",
+        "url": "https://travel.internal.example.com/a2a",
+        "skills": [
+          {
+            "id": "book_flight",
+            "name": "Flight Booking",
+            "description": "Book flights with corporate rates and policy compliance"
+          }
+        ]
+      },
+      "source": "https://who.internal.example.com"
+    }
+  ],
+  "referrals": [
+    {
+      "endpoint": "https://who.nlweb.ai/who",
+      "name": "Public Who Server",
+      "description": "Comprehensive index of public travel and booking agents",
+      "confidence": 85
+    },
+    {
+      "endpoint": "https://travel.who.example/who",
+      "name": "Travel Who Server",
+      "description": "Specialized index of airline, hotel, and travel booking services",
+      "confidence": 92
+    }
+  ]
+}
+
+In this example, the enterprise Who server returns the company's internal travel portal (which enforces corporate travel policy) while also providing referrals to public Who servers that index consumer travel services. The caller can decide whether to follow the referrals based on their needs.
+
+References
+Model Context Protocol
+A2A Protocol Specification
+Agent Skills Specification
+JSON-LD 1.1
+JSON Schema
+Sitemaps Protocol
+RFC 8615 - Well-Known URIs
+
