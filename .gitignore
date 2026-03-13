@@ -1,0 +1,4 @@
+__pycache__/
+.vscode/
+data/m365/*.tsv
+data/m365/*.ci

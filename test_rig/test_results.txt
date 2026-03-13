@@ -1,0 +1,436 @@
+========================================================================================================================
+WHO HANDLER RETRIEVAL STRATEGY TEST RIG
+========================================================================================================================
+
+Testing with 13 queries...
+Loading 5 sample agents...
+Created 5 agent documents
+Created 24 query documents
+✓ Mock backends initialized
+Generated embedding for query in 0.00s
+Mock search found 5 agent documents, returning top 30
+Retrieved 5 sites from search in 0.00s
+Ranking 5 new sites...
+Ranked 5 sites, 0 errors in 0.00s
+Query processed in 0.00s - Returned 2 results
+Using cached embedding
+Mock search found 24 query documents, returning top 60
+Retrieved 24 query documents from search in 0.00s
+Aggregated 24 query docs into 5 agents in 0.00s
+Ranking 5 aggregated agents...
+Ranked 5 agents, 0 errors in 0.00s
+Query-level strategy processed in 0.00s - Returned 2 results
+Generated embedding for query in 0.00s
+Mock search found 5 agent documents, returning top 30
+Retrieved 5 sites from search in 0.00s
+Ranking 5 new sites...
+Ranked 5 sites, 0 errors in 0.00s
+Query processed in 0.00s - Returned 1 results
+Using cached embedding
+Mock search found 24 query documents, returning top 60
+Retrieved 24 query documents from search in 0.00s
+Aggregated 24 query docs into 5 agents in 0.00s
+Ranking 5 aggregated agents...
+Ranked 5 agents, 0 errors in 0.00s
+Query-level strategy processed in 0.00s - Returned 1 results
+Generated embedding for query in 0.00s
+Mock search found 5 agent documents, returning top 30
+Retrieved 5 sites from search in 0.00s
+Ranking 5 new sites...
+Ranked 5 sites, 0 errors in 0.00s
+Query processed in 0.00s - Returned 0 results
+Using cached embedding
+Mock search found 24 query documents, returning top 60
+Retrieved 24 query documents from search in 0.00s
+Aggregated 24 query docs into 5 agents in 0.00s
+Ranking 5 aggregated agents...
+Ranked 5 agents, 0 errors in 0.00s
+Query-level strategy processed in 0.00s - Returned 0 results
+Generated embedding for query in 0.00s
+Mock search found 5 agent documents, returning top 30
+Retrieved 5 sites from search in 0.00s
+Ranking 5 new sites...
+Ranked 5 sites, 0 errors in 0.00s
+Query processed in 0.00s - Returned 1 results
+Using cached embedding
+Mock search found 24 query documents, returning top 60
+Retrieved 24 query documents from search in 0.00s
+Aggregated 24 query docs into 5 agents in 0.00s
+Ranking 5 aggregated agents...
+Ranked 5 agents, 0 errors in 0.00s
+Query-level strategy processed in 0.00s - Returned 1 results
+Generated embedding for query in 0.00s
+Mock search found 5 agent documents, returning top 30
+Retrieved 5 sites from search in 0.00s
+Ranking 5 new sites...
+Ranked 5 sites, 0 errors in 0.00s
+Query processed in 0.00s - Returned 1 results
+Using cached embedding
+Mock search found 24 query documents, returning top 60
+Retrieved 24 query documents from search in 0.00s
+Aggregated 24 query docs into 5 agents in 0.00s
+Ranking 5 aggregated agents...
+Ranked 5 agents, 0 errors in 0.00s
+Query-level strategy processed in 0.00s - Returned 1 results
+Generated embedding for query in 0.00s
+Mock search found 5 agent documents, returning top 30
+Retrieved 5 sites from search in 0.00s
+Ranking 5 new sites...
+Ranked 5 sites, 0 errors in 0.00s
+Query processed in 0.00s - Returned 1 results
+Using cached embedding
+Mock search found 24 query documents, returning top 60
+Retrieved 24 query documents from search in 0.00s
+Aggregated 24 query docs into 5 agents in 0.00s
+Ranking 5 aggregated agents...
+Ranked 5 agents, 0 errors in 0.00s
+Query-level strategy processed in 0.00s - Returned 1 results
+Generated embedding for query in 0.00s
+Mock search found 5 agent documents, returning top 30
+Retrieved 5 sites from search in 0.00s
+Ranking 5 new sites...
+Ranked 5 sites, 0 errors in 0.00s
+Query processed in 0.00s - Returned 2 results
+Using cached embedding
+Mock search found 24 query documents, returning top 60
+Retrieved 24 query documents from search in 0.00s
+Aggregated 24 query docs into 5 agents in 0.00s
+Ranking 5 aggregated agents...
+Ranked 5 agents, 0 errors in 0.00s
+Query-level strategy processed in 0.00s - Returned 2 results
+Generated embedding for query in 0.00s
+Mock search found 5 agent documents, returning top 30
+Retrieved 5 sites from search in 0.00s
+Ranking 5 new sites...
+Ranked 5 sites, 0 errors in 0.00s
+Query processed in 0.00s - Returned 0 results
+Using cached embedding
+Mock search found 24 query documents, returning top 60
+Retrieved 24 query documents from search in 0.00s
+Aggregated 24 query docs into 5 agents in 0.00s
+Ranking 5 aggregated agents...
+Ranked 5 agents, 0 errors in 0.00s
+Query-level strategy processed in 0.00s - Returned 0 results
+Generated embedding for query in 0.00s
+Mock search found 5 agent documents, returning top 30
+Retrieved 5 sites from search in 0.00s
+Ranking 5 new sites...
+Ranked 5 sites, 0 errors in 0.00s
+Query processed in 0.00s - Returned 1 results
+Using cached embedding
+Mock search found 24 query documents, returning top 60
+Retrieved 24 query documents from search in 0.00s
+Aggregated 24 query docs into 5 agents in 0.00s
+Ranking 5 aggregated agents...
+Ranked 5 agents, 0 errors in 0.00s
+Query-level strategy processed in 0.00s - Returned 1 results
+Generated embedding for query in 0.00s
+Mock search found 5 agent documents, returning top 30
+Retrieved 5 sites from search in 0.00s
+Ranking 5 new sites...
+Ranked 5 sites, 0 errors in 0.00s
+Query processed in 0.00s - Returned 1 results
+Using cached embedding
+Mock search found 24 query documents, returning top 60
+Retrieved 24 query documents from search in 0.00s
+Aggregated 24 query docs into 5 agents in 0.00s
+Ranking 5 aggregated agents...
+Ranked 5 agents, 0 errors in 0.00s
+Query-level strategy processed in 0.00s - Returned 1 results
+Generated embedding for query in 0.00s
+Mock search found 5 agent documents, returning top 30
+Retrieved 5 sites from search in 0.00s
+Ranking 5 new sites...
+Ranked 5 sites, 0 errors in 0.00s
+Query processed in 0.00s - Returned 1 results
+Using cached embedding
+Mock search found 24 query documents, returning top 60
+Retrieved 24 query documents from search in 0.00s
+Aggregated 24 query docs into 5 agents in 0.00s
+Ranking 5 aggregated agents...
+Ranked 5 agents, 0 errors in 0.00s
+Query-level strategy processed in 0.00s - Returned 1 results
+Generated embedding for query in 0.00s
+Mock search found 5 agent documents, returning top 30
+Retrieved 5 sites from search in 0.00s
+Ranking 5 new sites...
+Ranked 5 sites, 0 errors in 0.00s
+Query processed in 0.00s - Returned 1 results
+Using cached embedding
+Mock search found 24 query documents, returning top 60
+Retrieved 24 query documents from search in 0.00s
+Aggregated 24 query docs into 5 agents in 0.00s
+Ranking 5 aggregated agents...
+Ranked 5 agents, 0 errors in 0.00s
+Query-level strategy processed in 0.00s - Returned 1 results
+Generated embedding for query in 0.00s
+Mock search found 5 agent documents, returning top 30
+Retrieved 5 sites from search in 0.00s
+Ranking 5 new sites...
+Ranked 5 sites, 0 errors in 0.00s
+Query processed in 0.00s - Returned 1 results
+Using cached embedding
+Mock search found 24 query documents, returning top 60
+Retrieved 24 query documents from search in 0.00s
+Aggregated 24 query docs into 5 agents in 0.00s
+Ranking 5 aggregated agents...
+Ranked 5 agents, 0 errors in 0.00s
+Query-level strategy processed in 0.00s - Returned 1 results
+
+========================================================================================================================
+RETRIEVAL STRATEGY COMPARISON
+========================================================================================================================
+Query                               Expected             Agent Strategy       Query Strategy       Winner    
+------------------------------------------------------------------------------------------------------------------------
+help me improve my writing          Writing Coach        ✓ #1 (85)            ✓ #1 (100)           Query     
+translate text to Spanish           Writing Coach        ✓ #1 (80)            ✓ #1 (95)            Query     
+critique my essay                   Writing Coach        ✗ Not found          ✗ Not found          Tie       
+plan a trip to Japan                Travel Concierge     ✓ #1 (85)            ✓ #1 (95)            Query     
+find hotels in Paris                Travel Concierge     ✓ #1 (80)            ✓ #1 (95)            Query     
+book flights                        Travel Concierge     ✓ #1 (80)            ✓ #1 (90)            Query     
+review my Python code               Code Reviewer        ✓ #1 (90)            ✓ #1 (90)            Tie       
+find security vulnerabilities       Code Reviewer        ✗ Not found          ✗ Not found          Tie       
+explain this code                   Code Reviewer        ✓ #1 (85)            ✓ #1 (90)            Query     
+find dinner recipes                 Recipe Finder        ✓ #1 (85)            ✓ #1 (90)            Query     
+meal planning for the week          Recipe Finder        ✓ #1 (80)            ✓ #1 (100)           Query     
+what's the weather forecast         Weather Service      ✓ #1 (90)            ✓ #1 (95)            Query     
+get current weather                 Weather Service      ✓ #1 (85)            ✓ #1 (95)            Query     
+------------------------------------------------------------------------------------------------------------------------
+
+Summary: Agent Strategy: 0 wins | Query Strategy: 10 wins | Ties: 3
+========================================================================================================================
+
+========================================================================================================================
+DETAILED RESULTS
+========================================================================================================================
+
+1. Query: "help me improve my writing"
+   Expected: Writing Coach
+   Category: Writing
+
+   Agent Strategy:
+   - Top Result: Writing Coach (score: 85)
+   - Expected agent rank: #1 (score: 85)
+   - Total results: 2
+
+   Query Strategy:
+   - Top Result: Writing Coach (score: 100)
+   - Expected agent rank: #1 (score: 100)
+   - Total results: 2
+   - Matched queries:
+     • "Write a whitepaper" (score: 0.02)
+     • "Critique my writing" (score: 0.01)
+     • "Professional blog post" (score: -0.01)
+
+2. Query: "translate text to Spanish"
+   Expected: Writing Coach
+   Category: Writing
+
+   Agent Strategy:
+   - Top Result: Writing Coach (score: 80)
+   - Expected agent rank: #1 (score: 80)
+   - Total results: 1
+
+   Query Strategy:
+   - Top Result: Writing Coach (score: 95)
+   - Expected agent rank: #1 (score: 95)
+   - Total results: 1
+   - Matched queries:
+     • "Teach me how to write instructions" (score: 0.02)
+     • "Change the tone of an email or message" (score: 0.01)
+     • "Translate a piece of text" (score: 0.01)
+
+3. Query: "critique my essay"
+   Expected: Writing Coach
+   Category: Writing
+
+   Agent Strategy:
+   - Top Result: None (score: None)
+   - Expected agent: Not found
+   - Total results: 0
+
+   Query Strategy:
+   - Top Result: None (score: None)
+   - Expected agent: Not found
+   - Total results: 0
+
+4. Query: "plan a trip to Japan"
+   Expected: Travel Concierge
+   Category: Travel
+
+   Agent Strategy:
+   - Top Result: Travel Concierge (score: 85)
+   - Expected agent rank: #1 (score: 85)
+   - Total results: 1
+
+   Query Strategy:
+   - Top Result: Travel Concierge (score: 95)
+   - Expected agent rank: #1 (score: 95)
+   - Total results: 1
+   - Matched queries:
+     • "Plan a trip" (score: 0.02)
+     • "Create itinerary" (score: 0.01)
+     • "Recommend activities" (score: 0.00)
+
+5. Query: "find hotels in Paris"
+   Expected: Travel Concierge
+   Category: Travel
+
+   Agent Strategy:
+   - Top Result: Travel Concierge (score: 80)
+   - Expected agent rank: #1 (score: 80)
+   - Total results: 1
+
+   Query Strategy:
+   - Top Result: Travel Concierge (score: 95)
+   - Expected agent rank: #1 (score: 95)
+   - Total results: 1
+   - Matched queries:
+     • "Plan a trip" (score: 0.05)
+     • "Create itinerary" (score: 0.01)
+     • "Book flights" (score: -0.01)
+
+6. Query: "book flights"
+   Expected: Travel Concierge
+   Category: Travel
+
+   Agent Strategy:
+   - Top Result: Travel Concierge (score: 80)
+   - Expected agent rank: #1 (score: 80)
+   - Total results: 1
+
+   Query Strategy:
+   - Top Result: Travel Concierge (score: 90)
+   - Expected agent rank: #1 (score: 90)
+   - Total results: 1
+   - Matched queries:
+     • "Book flights" (score: 0.06)
+     • "Recommend activities" (score: 0.03)
+     • "Create itinerary" (score: 0.02)
+
+7. Query: "review my Python code"
+   Expected: Code Reviewer
+   Category: Code
+
+   Agent Strategy:
+   - Top Result: Code Reviewer (score: 90)
+   - Expected agent rank: #1 (score: 90)
+   - Total results: 2
+
+   Query Strategy:
+   - Top Result: Code Reviewer (score: 90)
+   - Expected agent rank: #1 (score: 90)
+   - Total results: 2
+   - Matched queries:
+     • "Review code" (score: 0.03)
+     • "Find security issues" (score: 0.03)
+     • "Explain code" (score: 0.02)
+
+8. Query: "find security vulnerabilities"
+   Expected: Code Reviewer
+   Category: Code
+
+   Agent Strategy:
+   - Top Result: None (score: None)
+   - Expected agent: Not found
+   - Total results: 0
+
+   Query Strategy:
+   - Top Result: None (score: None)
+   - Expected agent: Not found
+   - Total results: 0
+
+9. Query: "explain this code"
+   Expected: Code Reviewer
+   Category: Code
+
+   Agent Strategy:
+   - Top Result: Code Reviewer (score: 85)
+   - Expected agent rank: #1 (score: 85)
+   - Total results: 1
+
+   Query Strategy:
+   - Top Result: Code Reviewer (score: 90)
+   - Expected agent rank: #1 (score: 90)
+   - Total results: 1
+   - Matched queries:
+     • "Explain code" (score: 0.04)
+     • "Review code" (score: 0.02)
+     • "Find security issues" (score: 0.01)
+
+10. Query: "find dinner recipes"
+   Expected: Recipe Finder
+   Category: Recipes
+
+   Agent Strategy:
+   - Top Result: Recipe Finder (score: 85)
+   - Expected agent rank: #1 (score: 85)
+   - Total results: 1
+
+   Query Strategy:
+   - Top Result: Recipe Finder (score: 90)
+   - Expected agent rank: #1 (score: 90)
+   - Total results: 1
+   - Matched queries:
+     • "Meal planning" (score: 0.03)
+     • "Find recipes" (score: 0.02)
+     • "Ingredient substitution" (score: 0.02)
+
+11. Query: "meal planning for the week"
+   Expected: Recipe Finder
+   Category: Recipes
+
+   Agent Strategy:
+   - Top Result: Recipe Finder (score: 80)
+   - Expected agent rank: #1 (score: 80)
+   - Total results: 1
+
+   Query Strategy:
+   - Top Result: Recipe Finder (score: 100)
+   - Expected agent rank: #1 (score: 100)
+   - Total results: 1
+   - Matched queries:
+     • "Nutrition info" (score: 0.03)
+     • "Ingredient substitution" (score: -0.01)
+     • "Meal planning" (score: -0.02)
+
+12. Query: "what's the weather forecast"
+   Expected: Weather Service
+   Category: Weather
+
+   Agent Strategy:
+   - Top Result: Weather Service (score: 90)
+   - Expected agent rank: #1 (score: 90)
+   - Total results: 1
+
+   Query Strategy:
+   - Top Result: Weather Service (score: 95)
+   - Expected agent rank: #1 (score: 95)
+   - Total results: 1
+   - Matched queries:
+     • "Get weather" (score: 0.00)
+     • "Weather alerts" (score: -0.01)
+     • "Weather forecast" (score: -0.04)
+
+13. Query: "get current weather"
+   Expected: Weather Service
+   Category: Weather
+
+   Agent Strategy:
+   - Top Result: Weather Service (score: 85)
+   - Expected agent rank: #1 (score: 85)
+   - Total results: 1
+
+   Query Strategy:
+   - Top Result: Weather Service (score: 95)
+   - Expected agent rank: #1 (score: 95)
+   - Total results: 1
+   - Matched queries:
+     • "Get weather" (score: 0.04)
+     • "Weather forecast" (score: 0.00)
+     • "Historical weather" (score: -0.02)
+Cleaning up WHO Handler...
+WHO Handler cleanup complete
+
+✓ Test rig complete!
+

@@ -1,5 +1,8 @@
 """
 Web server with REST and MCP endpoints for WHO handler.
+Implements the Who Protocol specification (Version 0.1).
+
+See who_protocol.txt for full specification.
 """
 import os
 import json
@@ -22,48 +25,125 @@ MCP_PROTOCOL_VERSION = "2024-11-05"
 # ========== REST ENDPOINTS ==========
 
 async def who_endpoint(request: web.Request) -> web.Response:
-    """REST endpoint for WHO queries - supports both GET and POST"""
+    """
+    REST endpoint for WHO queries per /who protocol specification (Section 7).
+    Supports both GET and POST requests.
+
+    Request format (POST) per Section 3:
+    {
+        "query": {
+            "text": "natural language query",
+            "type": "A2AAgent",    // optional - filter by augment type
+            "domain": "recipes",   // optional - filter by domain
+            "capabilities": []     // optional - required capabilities
+        },
+        "meta": {
+            "version": "0.1",
+            "max_results": 10      // optional
+        }
+    }
+
+    Also supports legacy format:
+    {
+        "query": "natural language query"
+    }
+
+    Response format per Section 6:
+    {
+        "_meta": {
+            "response_type": "answer",
+            "version": "0.1",
+            "result_count": N
+        },
+        "results": [...]
+    }
+    """
     try:
         # Support both GET and POST requests
         if request.method == "GET":
-            # Get query from URL parameters
-            query = request.query.get("query", "").strip()
+            # Get query from URL parameters (legacy format)
+            query_text = request.query.get("query", "").strip()
+            augment_type = request.query.get("type")
+            domain = request.query.get("domain")
+            retrieval_strategy = request.query.get("strategy", "agent")
+            max_results = request.query.get("max_results")
+            if max_results:
+                try:
+                    max_results = int(max_results)
+                except ValueError:
+                    max_results = None
         else:
             # Parse JSON request body for POST
             data = await request.json()
-            query = data.get("query", "").strip()
 
-        if not query:
-            return web.json_response(
-                {"error": "Query parameter is required"},
-                status=400
-            )
+            # Support both new /who protocol format and legacy format
+            query_obj = data.get("query", {})
+            meta = data.get("meta", {})
 
-        print(f"REST request ({request.method}): {query[:100]}")
+            if isinstance(query_obj, str):
+                # Legacy format: query is a string
+                query_text = query_obj.strip()
+                augment_type = None
+                domain = None
+            else:
+                # New /who protocol format: query is an object
+                query_text = query_obj.get("text", "").strip()
+                augment_type = query_obj.get("type")
+                domain = query_obj.get("domain")
 
-        # Process query
-        results = await who_handler.who_query(query)
+            max_results = meta.get("max_results")
+            retrieval_strategy = meta.get("strategy", "agent")
 
-        # Return with same wrapper structure as MCP
-        return web.json_response({
-            "content": [{
-                "type": "text",
-                "text": json.dumps(results, indent=2)
-            }],
-            "isError": False
-        })
+        if not query_text:
+            # Return /who protocol error response
+            return web.json_response({
+                "_meta": {
+                    "response_type": "failure",
+                    "version": "0.1"
+                },
+                "error": {
+                    "code": "INVALID_QUERY",
+                    "message": "Query text is required"
+                }
+            }, status=400)
+
+        print(f"REST request ({request.method}): {query_text[:100]} [strategy={retrieval_strategy}]")
+
+        # Process query with /who protocol parameters
+        result = await who_handler.who_query(
+            query=query_text,
+            augment_type=augment_type,
+            domain=domain,
+            max_results=max_results,
+            retrieval_strategy=retrieval_strategy
+        )
+
+        # Return /who protocol response directly
+        return web.json_response(result)
 
     except json.JSONDecodeError:
-        return web.json_response(
-            {"error": "Invalid JSON in request body"},
-            status=400
-        )
+        return web.json_response({
+            "_meta": {
+                "response_type": "failure",
+                "version": "0.1"
+            },
+            "error": {
+                "code": "INVALID_QUERY",
+                "message": "Invalid JSON in request body"
+            }
+        }, status=400)
     except Exception as e:
         print(f"Error in WHO endpoint: {e}")
-        return web.json_response(
-            {"error": str(e)},
-            status=500
-        )
+        return web.json_response({
+            "_meta": {
+                "response_type": "failure",
+                "version": "0.1"
+            },
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": str(e)
+            }
+        }, status=500)
 
 
 # ========== MCP ENDPOINTS ==========
@@ -109,16 +189,50 @@ async def mcp_endpoint(request: web.Request) -> web.Response:
                 return web.Response(status=204)
 
         elif method == "tools/list":
+            # MCP tool definition per /who protocol specification (Section 8.1)
             result = {
                 "tools": [{
                     "name": "who",
-                    "description": "Find the most relevant sites to answer a query",
+                    "description": "Find agents, tools, and services that can help answer a query. Returns ranked augments with invocation details.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "query": {
-                                "type": "string",
-                                "description": "The question to find relevant sites for"
+                                "type": "object",
+                                "description": "The query specifying what augments are needed",
+                                "properties": {
+                                    "text": {
+                                        "type": "string",
+                                        "description": "Natural language description of the need"
+                                    },
+                                    "type": {
+                                        "type": "string",
+                                        "description": "Filter by augment type (e.g., A2AAgent, MCPTool, Skill)"
+                                    },
+                                    "domain": {
+                                        "type": "string",
+                                        "description": "Filter by domain (e.g., recipes, travel, finance)"
+                                    },
+                                    "capabilities": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "Required capabilities"
+                                    }
+                                },
+                                "required": ["text"]
+                            },
+                            "meta": {
+                                "type": "object",
+                                "description": "Request metadata",
+                                "properties": {
+                                    "version": {"type": "string"},
+                                    "max_results": {"type": "integer"},
+                                    "strategy": {
+                                        "type": "string",
+                                        "description": "Retrieval strategy: 'agent' (default) or 'query'",
+                                        "enum": ["agent", "query"]
+                                    }
+                                }
                             }
                         },
                         "required": ["query"]
@@ -131,34 +245,73 @@ async def mcp_endpoint(request: web.Request) -> web.Response:
             arguments = params.get("arguments", {})
 
             if tool_name == "who":
-                query = arguments.get("query", "").strip()
+                # Parse /who protocol request format
+                query_obj = arguments.get("query", {})
+                meta = arguments.get("meta", {})
 
-                if not query:
+                # Support both new format (object) and legacy format (string)
+                if isinstance(query_obj, str):
+                    query_text = query_obj.strip()
+                    augment_type = None
+                    domain = None
+                else:
+                    query_text = query_obj.get("text", "").strip()
+                    augment_type = query_obj.get("type")
+                    domain = query_obj.get("domain")
+
+                max_results = meta.get("max_results")
+                retrieval_strategy = meta.get("strategy", "agent")
+
+                if not query_text:
                     error = {
                         "code": -32602,  # Invalid params
-                        "message": "Query parameter is required"
+                        "message": "Query text is required"
                     }
                 else:
-                    print(f"MCP tool call: who query='{query[:100]}'")
+                    print(f"MCP tool call: who query='{query_text[:100]}' [strategy={retrieval_strategy}]")
 
-                    # Process the query
+                    # Process the query with /who protocol parameters
                     try:
-                        results = await who_handler.who_query(query)
+                        who_result = await who_handler.who_query(
+                            query=query_text,
+                            augment_type=augment_type,
+                            domain=domain,
+                            max_results=max_results,
+                            retrieval_strategy=retrieval_strategy
+                        )
 
-                        # Format response for MCP - just return the results array
+                        # Format response for MCP per /who protocol spec
+                        # Include the full /who response structure
+                        is_error = who_result.get("_meta", {}).get("response_type") == "failure"
+
                         result = {
                             "content": [{
                                 "type": "text",
-                                "text": json.dumps(results, indent=2)
+                                "text": f"Found {who_result.get('_meta', {}).get('result_count', 0)} augments that can help"
                             }],
-                            "isError": False
+                            "_meta": who_result.get("_meta"),
+                            "results": who_result.get("results", []),
+                            "isError": is_error
                         }
+
+                        # Include error info if present
+                        if "error" in who_result:
+                            result["error"] = who_result["error"]
+
                     except Exception as e:
                         result = {
                             "content": [{
                                 "type": "text",
                                 "text": f"Error processing query: {str(e)}"
                             }],
+                            "_meta": {
+                                "response_type": "failure",
+                                "version": "0.1"
+                            },
+                            "error": {
+                                "code": "INTERNAL_ERROR",
+                                "message": str(e)
+                            },
                             "isError": True
                         }
             else:

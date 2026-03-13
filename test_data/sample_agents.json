@@ -1,0 +1,244 @@
+[
+  {
+    "id": "writing-coach",
+    "name": "Writing Coach",
+    "type": "A2AAgent",
+    "url": "https://agents.example.com/writing-coach",
+    "description": "AI writing assistant that helps improve your writing with detailed feedback and suggestions.",
+    "capabilities": "Critique my writing. Provide detailed and constructive feedback on a piece of writing. Change the tone of an email or message. Help change the tone of an email or message from professional language to a more casual tone. Translate a piece of text. Translate a piece of text into another language. Teach me how to write instructions. Help me write instructions to explain a complex process. Professional blog post. Help me write a blog post for my company. Write a whitepaper. Help me write a whitepaper.",
+    "sample_queries": [
+      {
+        "short": "Critique my writing",
+        "detail": "Provide detailed and constructive feedback on a piece of writing"
+      },
+      {
+        "short": "Change the tone of an email or message",
+        "detail": "Help change the tone of an email or message from professional language to a more casual tone"
+      },
+      {
+        "short": "Translate a piece of text",
+        "detail": "Translate a piece of text into another language"
+      },
+      {
+        "short": "Teach me how to write instructions",
+        "detail": "Help me write instructions to explain a complex process"
+      },
+      {
+        "short": "Professional blog post",
+        "detail": "Help me write a blog post for my company"
+      },
+      {
+        "short": "Write a whitepaper",
+        "detail": "Help me write a whitepaper"
+      }
+    ],
+    "skills": [
+      {
+        "id": "critique_writing",
+        "name": "Critique Writing",
+        "description": "Provide detailed and constructive feedback on a piece of writing",
+        "examples": ["critique my essay", "review my article"]
+      },
+      {
+        "id": "change_tone",
+        "name": "Change Tone",
+        "description": "Help change the tone of an email or message",
+        "examples": ["make this more casual", "formalize this email"]
+      },
+      {
+        "id": "translate",
+        "name": "Translate Text",
+        "description": "Translate a piece of text into another language",
+        "examples": ["translate to Spanish", "convert to French"]
+      }
+    ]
+  },
+  {
+    "id": "travel-concierge",
+    "name": "Travel Concierge",
+    "type": "A2AAgent",
+    "url": "https://agents.example.com/travel-concierge",
+    "description": "Personal travel planning assistant that helps you plan trips, book accommodations, and discover activities.",
+    "capabilities": "Plan a trip. Help plan a complete trip including flights, hotels, and activities. Find hotels. Search and compare hotels in your destination. Book flights. Find and book the best flight options. Recommend activities. Suggest activities and attractions at your destination. Create itinerary. Build a day-by-day travel itinerary.",
+    "sample_queries": [
+      {
+        "short": "Plan a trip",
+        "detail": "Help plan a complete trip including flights, hotels, and activities"
+      },
+      {
+        "short": "Find hotels",
+        "detail": "Search and compare hotels in your destination"
+      },
+      {
+        "short": "Book flights",
+        "detail": "Find and book the best flight options"
+      },
+      {
+        "short": "Recommend activities",
+        "detail": "Suggest activities and attractions at your destination"
+      },
+      {
+        "short": "Create itinerary",
+        "detail": "Build a day-by-day travel itinerary"
+      }
+    ],
+    "skills": [
+      {
+        "id": "plan_trip",
+        "name": "Trip Planning",
+        "description": "Help plan a complete trip",
+        "examples": ["plan a trip to Japan", "help me visit Paris"]
+      },
+      {
+        "id": "book_hotels",
+        "name": "Hotel Booking",
+        "description": "Search and compare hotels",
+        "examples": ["find hotels in Tokyo", "book accommodation"]
+      }
+    ]
+  },
+  {
+    "id": "code-reviewer",
+    "name": "Code Reviewer",
+    "type": "A2AAgent",
+    "url": "https://agents.example.com/code-reviewer",
+    "description": "AI code review assistant that analyzes code quality, identifies bugs, and suggests improvements.",
+    "capabilities": "Review code. Analyze code for bugs, security issues, and best practices. Explain code. Explain what a piece of code does. Suggest improvements. Recommend ways to improve code quality and performance. Find security issues. Identify potential security vulnerabilities. Generate tests. Create unit tests for existing code.",
+    "sample_queries": [
+      {
+        "short": "Review code",
+        "detail": "Analyze code for bugs, security issues, and best practices"
+      },
+      {
+        "short": "Explain code",
+        "detail": "Explain what a piece of code does"
+      },
+      {
+        "short": "Suggest improvements",
+        "detail": "Recommend ways to improve code quality and performance"
+      },
+      {
+        "short": "Find security issues",
+        "detail": "Identify potential security vulnerabilities"
+      },
+      {
+        "short": "Generate tests",
+        "detail": "Create unit tests for existing code"
+      }
+    ],
+    "skills": [
+      {
+        "id": "code_review",
+        "name": "Code Review",
+        "description": "Analyze code for bugs and best practices",
+        "examples": ["review my Python code", "check this function"]
+      },
+      {
+        "id": "security_audit",
+        "name": "Security Audit",
+        "description": "Identify security vulnerabilities",
+        "examples": ["find security issues", "check for vulnerabilities"]
+      }
+    ]
+  },
+  {
+    "id": "recipe-finder",
+    "name": "Recipe Finder",
+    "type": "MCPServer",
+    "url": "https://mcp.example.com/recipe-finder",
+    "description": "MCP server that helps you find recipes, plan meals, and discover new cooking ideas based on ingredients you have.",
+    "capabilities": "Find recipes. Search for recipes by ingredients, cuisine, or dietary restrictions. Meal planning. Create weekly meal plans. Ingredient substitution. Suggest alternatives for missing ingredients. Nutrition info. Get nutritional information for recipes.",
+    "sample_queries": [
+      {
+        "short": "Find recipes",
+        "detail": "Search for recipes by ingredients, cuisine, or dietary restrictions"
+      },
+      {
+        "short": "Meal planning",
+        "detail": "Create weekly meal plans"
+      },
+      {
+        "short": "Ingredient substitution",
+        "detail": "Suggest alternatives for missing ingredients"
+      },
+      {
+        "short": "Nutrition info",
+        "detail": "Get nutritional information for recipes"
+      }
+    ],
+    "tools": [
+      {
+        "name": "search_recipes",
+        "description": "Search for recipes by ingredients or cuisine",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ingredients": {"type": "array", "items": {"type": "string"}},
+            "cuisine": {"type": "string"}
+          }
+        }
+      },
+      {
+        "name": "get_nutrition",
+        "description": "Get nutritional information for a recipe",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "recipe_id": {"type": "string"}
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "weather-service",
+    "name": "Weather Service",
+    "type": "MCPServer",
+    "url": "https://mcp.example.com/weather-service",
+    "description": "MCP server providing weather forecasts, alerts, and historical weather data.",
+    "capabilities": "Get weather. Retrieve current weather conditions for any location. Weather forecast. Get multi-day weather forecasts. Weather alerts. Receive severe weather alerts and warnings. Historical weather. Access historical weather data.",
+    "sample_queries": [
+      {
+        "short": "Get weather",
+        "detail": "Retrieve current weather conditions for any location"
+      },
+      {
+        "short": "Weather forecast",
+        "detail": "Get multi-day weather forecasts"
+      },
+      {
+        "short": "Weather alerts",
+        "detail": "Receive severe weather alerts and warnings"
+      },
+      {
+        "short": "Historical weather",
+        "detail": "Access historical weather data"
+      }
+    ],
+    "tools": [
+      {
+        "name": "get_current_weather",
+        "description": "Get current weather for a location",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "location": {"type": "string"}
+          },
+          "required": ["location"]
+        }
+      },
+      {
+        "name": "get_forecast",
+        "description": "Get weather forecast",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "location": {"type": "string"},
+            "days": {"type": "integer"}
+          },
+          "required": ["location"]
+        }
+      }
+    ]
+  }
+]
