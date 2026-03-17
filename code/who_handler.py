@@ -21,7 +21,7 @@ WHO_PROTOCOL_VERSION = "0.1"
 
 # Settings from environment variables
 SETTINGS = {
-    "score_threshold": int(os.getenv("WHO_SCORE_THRESHOLD", "70")),
+    "score_threshold": int(os.getenv("WHO_SCORE_THRESHOLD", "64")),
     "early_threshold": int(os.getenv("WHO_EARLY_THRESHOLD", "85")),  # Return early if enough high scores
     "max_results": int(os.getenv("WHO_MAX_RESULTS", "10")),
     "search_top_k": int(os.getenv("WHO_SEARCH_TOP_K", "30")),
@@ -37,7 +37,6 @@ ERROR_CODES = {
     "RATE_LIMITED": "Too many requests",
     "INTERNAL_ERROR": "Service error",
 }
-
 
 class TTLCache:
     """Simple TTL cache with LRU eviction"""
@@ -76,7 +75,6 @@ class TTLCache:
         """Get current cache size"""
         return len(self.cache)
 
-
 class WHOHandler:
     """Main WHO query handler with caching and parallel processing"""
 
@@ -105,8 +103,6 @@ class WHOHandler:
 
     async def initialize(self):
         """Initialize backends"""
-        print("Initializing WHO Handler...")
-
         # Get and initialize backends
         self.search_backend = get_search_backend()
         self.llm_backend = get_llm_backend()
@@ -115,8 +111,6 @@ class WHOHandler:
             self.search_backend.initialize(),
             self.llm_backend.initialize()
         )
-
-        print("WHO Handler initialized successfully")
 
     async def process_query(
         self,
@@ -165,41 +159,30 @@ class WHOHandler:
         Strategy 1: Agent-Level Retrieval
         Retrieve agent documents directly and rank them.
         """
-        start_time = time.time()
-
         try:
             # 1. Get embedding (with cache)
-            embedding_start = time.time()
             if query not in self.embedding_cache:
                 self.embedding_cache[query] = await self.llm_backend.get_embedding(query)
-                print(f"Generated embedding for query in {time.time() - embedding_start:.2f}s")
-            else:
-                print(f"Using cached embedding")
 
             vector = self.embedding_cache[query]
 
             # 2. Search for relevant sites (with cache)
-            search_start = time.time()
             cache_key = hashlib.md5(query.encode()).hexdigest()
             search_results = self.search_cache.get(cache_key)
 
             if search_results is None:
                 self.stats["cache_misses"] += 1
                 search_results = await self.search_backend.search(
-                    query, vector, SETTINGS["search_top_k"]
+                    query, vector, SETTINGS["search_top_k"], strategy="agent"
                 )
                 self.search_cache.set(cache_key, search_results)
-                print(f"Retrieved {len(search_results)} sites from search in {time.time() - search_start:.2f}s")
             else:
                 self.stats["cache_hits"] += 1
-                print(f"Using cached search results ({len(search_results)} sites)")
 
             if not search_results:
-                print("No search results found")
                 return self._build_response([])
 
             # 3. Rank sites in parallel
-            ranking_start = time.time()
             ranking_tasks = []
 
             for site in search_results:
@@ -215,17 +198,13 @@ class WHOHandler:
 
             # Execute ranking tasks and check for early return
             high_score_results = []  # Track high-scoring results for early return
-            completed_count = 0
-            error_count = 0
 
             if ranking_tasks:
-                print(f"Ranking {len(ranking_tasks)} new sites...")
 
                 # Process results as they complete
                 for completed_task in asyncio.as_completed(ranking_tasks):
                     try:
-                        result = await completed_task
-                        completed_count += 1
+                        await completed_task
 
                         # Check cached result for high score
                         # The task has already cached the result, so check all cached results
@@ -245,45 +224,42 @@ class WHOHandler:
 
                                     # Check if we have enough high-scoring results for early return
                                     if len(high_score_results) >= result_limit:
-                                        print(f"Early return: Found {len(high_score_results)} high-scoring results (>= {SETTINGS['early_threshold']})")
                                         # Sort and return early
                                         high_score_results.sort(key=lambda x: x["score"], reverse=True)
                                         return self._build_response(high_score_results[:result_limit])
 
                     except Exception as e:
-                        error_count += 1
                         # Continue processing other tasks
-
-                print(f"Ranked {completed_count} sites, {error_count} errors in {time.time() - ranking_start:.2f}s")
-            else:
-                print("All sites already ranked (from cache)")
+                        pass
 
             # 4. Collect and filter results
             final_results = []
+            filtered_count = 0
+            scores = []
 
             for site in search_results:
                 rank_cache_key = (cache_key, site["url"])
                 ranking = self.ranking_cache.get(rank_cache_key)
 
-                if ranking and ranking["score"] > SETTINGS["score_threshold"]:
-                    # Extract @type from json_ld if available
-                    schema_type = self._extract_schema_type(site)
+                if ranking:
+                    scores.append((site.get("name", "Unknown"), ranking["score"]))
+                    if ranking["score"] > SETTINGS["score_threshold"]:
+                        # Extract @type from json_ld if available
+                        schema_type = self._extract_schema_type(site)
 
-                    # Apply type filter if specified
-                    if augment_type and not self._matches_type(schema_type, augment_type):
-                        continue
+                        # Apply type filter if specified
+                        if augment_type and not self._matches_type(schema_type, augment_type):
+                            continue
 
-                    final_results.append(
-                        self._build_result_object(site, ranking, schema_type)
-                    )
+                        final_results.append(
+                            self._build_result_object(site, ranking, schema_type)
+                        )
+                    else:
+                        filtered_count += 1
 
             # 5. Sort by score and return top results
             final_results.sort(key=lambda x: x["score"], reverse=True)
             top_results = final_results[:result_limit]
-
-            # Log performance metrics
-            total_time = time.time() - start_time
-            print(f"Query processed in {total_time:.2f}s - Returned {len(top_results)} results")
 
             # Update statistics
             self.stats["total_sites_ranked"] += len(ranking_tasks)
@@ -291,9 +267,6 @@ class WHOHandler:
             return self._build_response(top_results)
 
         except Exception as e:
-            print(f"Error processing query: {e}")
-            import traceback
-            traceback.print_exc()
             return self._build_error_response("INTERNAL_ERROR", str(e))
 
     async def _process_query_strategy(
@@ -312,17 +285,12 @@ class WHOHandler:
 
         try:
             # 1. Get embedding (with cache)
-            embedding_start = time.time()
             if query not in self.embedding_cache:
                 self.embedding_cache[query] = await self.llm_backend.get_embedding(query)
-                print(f"Generated embedding for query in {time.time() - embedding_start:.2f}s")
-            else:
-                print(f"Using cached embedding")
 
             vector = self.embedding_cache[query]
 
             # 2. Search for relevant QUERY documents (more results needed)
-            search_start = time.time()
             cache_key = hashlib.md5((query + "_query_strategy").encode()).hexdigest()
             search_results = self.search_cache.get(cache_key)
 
@@ -330,29 +298,24 @@ class WHOHandler:
                 self.stats["cache_misses"] += 1
                 # Retrieve more documents since we need to aggregate
                 search_results = await self.search_backend.search(
-                    query, vector, SETTINGS["search_top_k"] * 2
+                    query, vector, SETTINGS["search_top_k"] * 2, strategy="query"
                 )
                 self.search_cache.set(cache_key, search_results)
-                print(f"Retrieved {len(search_results)} query documents from search in {time.time() - search_start:.2f}s")
             else:
                 self.stats["cache_hits"] += 1
-                print(f"Using cached search results ({len(search_results)} query documents)")
 
             if not search_results:
-                print("No search results found")
+
                 return self._build_response([])
 
             # 3. Aggregate query documents by agent
-            aggregation_start = time.time()
             aggregated_agents = self._aggregate_by_agent(search_results)
-            print(f"Aggregated {len(search_results)} query docs into {len(aggregated_agents)} agents in {time.time() - aggregation_start:.2f}s")
 
             if not aggregated_agents:
-                print("No agents after aggregation")
+
                 return self._build_response([])
 
             # 4. Rank aggregated agents in parallel
-            ranking_start = time.time()
             ranking_tasks = []
 
             for agent in aggregated_agents:
@@ -368,22 +331,14 @@ class WHOHandler:
                 ranking_tasks.append(self._rank_aggregated_agent(query, agent, rank_cache_key))
 
             # Execute ranking tasks
-            completed_count = 0
-            error_count = 0
 
             if ranking_tasks:
-                print(f"Ranking {len(ranking_tasks)} aggregated agents...")
 
                 for completed_task in asyncio.as_completed(ranking_tasks):
                     try:
                         await completed_task
-                        completed_count += 1
                     except Exception as e:
-                        error_count += 1
-
-                print(f"Ranked {completed_count} agents, {error_count} errors in {time.time() - ranking_start:.2f}s")
-            else:
-                print("All agents already ranked (from cache)")
+                        pass
 
             # 5. Collect and filter results
             final_results = []
@@ -433,16 +388,12 @@ class WHOHandler:
             top_results = final_results[:result_limit]
 
             # Log performance metrics
-            total_time = time.time() - start_time
-            print(f"Query-level strategy processed in {total_time:.2f}s - Returned {len(top_results)} results")
-
             # Update statistics
             self.stats["total_sites_ranked"] += len(ranking_tasks)
 
             return self._build_response(top_results)
 
         except Exception as e:
-            print(f"Error processing query (query strategy): {e}")
             import traceback
             traceback.print_exc()
             return self._build_error_response("INTERNAL_ERROR", str(e))
@@ -536,7 +487,7 @@ class WHOHandler:
             }
 
             # Get ranking from LLM
-            ranking = await self.llm_backend.rank_site(query, json.dumps(context, indent=2))
+            ranking = await self.llm_backend.rank_agent(query, json.dumps(context, indent=2))
 
             # Cache the result
             self.ranking_cache.set(cache_key, ranking)
@@ -544,7 +495,8 @@ class WHOHandler:
             return True
 
         except Exception as e:
-            print(f"Error ranking aggregated agent {agent.get('agent_name', 'Unknown')}: {e}")
+            import traceback
+            traceback.print_exc()
 
             # Cache error result to avoid retrying
             self.ranking_cache.set(cache_key, {
@@ -788,8 +740,9 @@ class WHOHandler:
             True if ranking was successful
         """
         try:
-            # Get ranking from LLM
-            ranking = await self.llm_backend.rank_site(query, site.get("json_ld", "{}"))
+            # Get ranking from LLM using description field
+            agent_description = site.get("description", "") or site.get("json_ld", "{}")
+            ranking = await self.llm_backend.rank_agent(query, agent_description)
 
             # Cache the result
             self.ranking_cache.set(cache_key, ranking)
@@ -797,7 +750,8 @@ class WHOHandler:
             return True
 
         except Exception as e:
-            print(f"Error ranking site {site.get('name', 'Unknown')}: {e}")
+            import traceback
+            traceback.print_exc()
 
             # Cache error result to avoid retrying
             self.ranking_cache.set(cache_key, {
@@ -821,11 +775,9 @@ class WHOHandler:
         self.embedding_cache.clear()
         self.search_cache.clear()
         self.ranking_cache.clear()
-        print("All caches cleared")
 
     async def cleanup(self):
         """Cleanup resources"""
-        print("Cleaning up WHO Handler...")
 
         # Cleanup backends
         cleanup_tasks = []
@@ -837,12 +789,8 @@ class WHOHandler:
         if cleanup_tasks:
             await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 
-        print("WHO Handler cleanup complete")
-
-
 # Global handler instance
 _handler: Optional[WHOHandler] = None
-
 
 async def get_handler() -> WHOHandler:
     """Get or create the global handler instance"""
@@ -852,14 +800,14 @@ async def get_handler() -> WHOHandler:
         await _handler.initialize()
     return _handler
 
-
 async def who_query(
     query: str,
     augment_type: Optional[str] = None,
     domain: Optional[str] = None,
     capabilities: Optional[List[str]] = None,
     max_results: Optional[int] = None,
-    retrieval_strategy: str = "agent"
+    retrieval_strategy: str = "agent",
+    ranking_model: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Main entry point for WHO queries per /who protocol (Section 3).
@@ -871,6 +819,7 @@ async def who_query(
         capabilities: Array of required capabilities
         max_results: Maximum number of results to return
         retrieval_strategy: "agent" (Strategy 1) or "query" (Strategy 2)
+        ranking_model: LLM model to use for ranking (e.g., "gpt-4.1", "gpt-4.1-mini")
 
     Returns:
         Dict with _meta and results per /who protocol specification (Section 6)
@@ -898,18 +847,15 @@ async def who_query(
         retrieval_strategy=retrieval_strategy
     )
 
-
 async def get_stats() -> Dict[str, Any]:
     """Get handler statistics"""
     handler = await get_handler()
     return await handler.get_stats()
 
-
 async def clear_caches():
     """Clear all caches"""
     handler = await get_handler()
     await handler.clear_caches()
-
 
 async def cleanup():
     """Cleanup resources on shutdown"""

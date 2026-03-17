@@ -12,8 +12,7 @@ SEARCH_CONFIG = {
     "provider": os.getenv("SEARCH_PROVIDER", "azure"),  # azure, elasticsearch, qdrant
     "endpoint": os.getenv("SEARCH_ENDPOINT"),  # Must be set via environment variable
     "api_key": os.getenv("SEARCH_API_KEY"),  # Must be set via environment variable
-    "index": os.getenv("SEARCH_INDEX", "embeddings1536"),
-    "site": os.getenv("SEARCH_SITE", "nlweb_sites"),  # Site filter for queries
+    "index": os.getenv("SEARCH_INDEX", "agents-collection"),  # Default to agent-level collection
 }
 
 
@@ -26,9 +25,14 @@ class SearchBackend(ABC):
         pass
 
     @abstractmethod
-    async def search(self, query: str, vector: List[float], top_k: int = 30) -> List[Dict[str, Any]]:
+    async def search(self, query: str, vector: List[float], top_k: int = 30, strategy: str = "agent") -> List[Dict[str, Any]]:
         """
         Search for sites.
+        Args:
+            query: Search query text
+            vector: Query embedding vector
+            top_k: Number of results to return
+            strategy: "agent" for agent-level or "query" for query-level retrieval
         Returns: List of {"url": str, "json_ld": str, "name": str, "site": str}
         """
         pass
@@ -43,13 +47,14 @@ class AzureSearchBackend(SearchBackend):
     """Azure AI Search implementation"""
 
     def __init__(self):
-        self.client = None
         self.session = None
+        self.endpoint = None
+        self.api_key = None
+        self.clients = {}  # Cache clients for different indices
 
     async def initialize(self):
         """Initialize Azure Search client with connection pooling"""
         import aiohttp
-        from azure.search.documents.aio import SearchClient
         from azure.core.credentials import AzureKeyCredential
 
         # Validate required configuration
@@ -76,31 +81,48 @@ class AzureSearchBackend(SearchBackend):
             timeout=aiohttp.ClientTimeout(total=10)
         )
 
-        # Create search client
-        self.client = SearchClient(
-            endpoint=SEARCH_CONFIG["endpoint"],
-            index_name=SEARCH_CONFIG["index"],
-            credential=AzureKeyCredential(SEARCH_CONFIG["api_key"]),
-            session=self.session
-        )
+        # Store credentials for creating clients on demand
+        self.endpoint = SEARCH_CONFIG["endpoint"]
+        self.api_key = SEARCH_CONFIG["api_key"]
 
-        print(f"Azure Search initialized: {SEARCH_CONFIG['endpoint']}/{SEARCH_CONFIG['index']}")
 
-    async def search(self, query: str, vector: List[float], top_k: int = 30) -> List[Dict[str, Any]]:
+    async def search(self, query: str, vector: List[float], top_k: int = 30, strategy: str = "agent") -> List[Dict[str, Any]]:
         """Search Azure AI Search with vector search"""
+        from azure.search.documents.aio import SearchClient
+        from azure.core.credentials import AzureKeyCredential
+
         results = []
 
         try:
+            # Determine index based on strategy
+            if strategy == "query":
+                index_name = "queries-index"
+            else:
+                index_name = "agents-index"
+
+            # Get or create client for this index
+            if index_name not in self.clients:
+                self.clients[index_name] = SearchClient(
+                    endpoint=self.endpoint,
+                    index_name=index_name,
+                    credential=AzureKeyCredential(self.api_key),
+                    session=self.session
+                )
+
+            client = self.clients[index_name]
+
             # Configure search request for vector search
+            # Select fields based on strategy
+            if strategy == "query":
+                select_fields = ["url", "name", "agent_id", "agent_name", "agent_url", "query", "query_detail", "agent_json_ld", "description"]
+            else:
+                select_fields = ["url", "json_ld", "name", "description"]
+
             search_kwargs = {
                 "search_text": None,  # Use None for vector search
-                "select": ["url", "schema_json", "name", "site"],  # Use correct field name
+                "select": select_fields,
                 "top": top_k,
             }
-
-            # Add site filter if configured
-            if SEARCH_CONFIG.get("site"):
-                search_kwargs["filter"] = f"site eq '{SEARCH_CONFIG['site']}'"
 
             # Add vector search if vector is provided
             if vector:
@@ -111,20 +133,36 @@ class AzureSearchBackend(SearchBackend):
                     "k": top_k  # Use "k" instead of "k_nearest_neighbors"
                 }]
 
-            # Execute search
-            response = await self.client.search(**search_kwargs)
+            # Print search configuration for debugging
 
-            # Collect results - map schema_json to json_ld
+            # Execute search
+            response = await client.search(**search_kwargs)
+
+            # Collect results
             async for item in response:
-                results.append({
-                    "url": item.get("url", ""),
-                    "json_ld": item.get("schema_json", "{}"),  # Map schema_json to json_ld
-                    "name": item.get("name", "Unknown"),
-                    "site": item.get("site", "")
-                })
+                if strategy == "query":
+                    # Query document fields
+                    results.append({
+                        "url": item.get("url", ""),
+                        "name": item.get("name", "Unknown"),
+                        "agent_id": item.get("agent_id", ""),
+                        "agent_name": item.get("agent_name", ""),
+                        "agent_url": item.get("agent_url", ""),
+                        "query": item.get("query", ""),
+                        "query_detail": item.get("query_detail", ""),
+                        "agent_json_ld": item.get("agent_json_ld", "{}"),
+                        "description": item.get("description", "")
+                    })
+                else:
+                    # Agent document fields
+                    results.append({
+                        "url": item.get("url", ""),
+                        "json_ld": item.get("json_ld", "{}"),
+                        "name": item.get("name", "Unknown"),
+                        "description": item.get("description", "")
+                    })
 
         except Exception as e:
-            print(f"Azure Search error: {e}")
             # Return empty results on error rather than crashing
             return []
 
@@ -152,7 +190,7 @@ class ElasticsearchBackend(SearchBackend):
         # )
         raise NotImplementedError("Elasticsearch backend not yet implemented")
 
-    async def search(self, query: str, vector: List[float], top_k: int = 30) -> List[Dict[str, Any]]:
+    async def search(self, query: str, vector: List[float], top_k: int = 30, strategy: str = "agent") -> List[Dict[str, Any]]:
         """Search Elasticsearch"""
         raise NotImplementedError("Elasticsearch backend not yet implemented")
 
@@ -163,27 +201,82 @@ class ElasticsearchBackend(SearchBackend):
 
 
 class QdrantBackend(SearchBackend):
-    """Qdrant implementation (placeholder for future implementation)"""
+    """Qdrant implementation"""
 
     def __init__(self):
         self.client = None
+        self.collection_name = None
 
     async def initialize(self):
         """Initialize Qdrant client"""
-        # Example implementation
-        # from qdrant_client import QdrantClient
-        # self.client = QdrantClient(
-        #     url=SEARCH_CONFIG["endpoint"],
-        #     api_key=SEARCH_CONFIG["api_key"]
-        # )
-        raise NotImplementedError("Qdrant backend not yet implemented")
+        from qdrant_client import QdrantClient
+        from pathlib import Path
 
-    async def search(self, query: str, vector: List[float], top_k: int = 30) -> List[Dict[str, Any]]:
+        # Use local Qdrant storage
+        qdrant_path = SEARCH_CONFIG.get("endpoint") or str(Path.home() / ".qdrant" / "agentfinder")
+
+        # Determine collection based on index config
+        index_name = SEARCH_CONFIG.get("index", "agents-collection")
+        if "query" in index_name.lower() or index_name == "queries-index":
+            self.collection_name = "queries-collection"
+        else:
+            self.collection_name = "agents-collection"
+
+        self.client = QdrantClient(path=qdrant_path)
+
+
+    async def search(self, query: str, vector: List[float], top_k: int = 30, strategy: str = "agent") -> List[Dict[str, Any]]:
         """Search Qdrant"""
-        raise NotImplementedError("Qdrant backend not yet implemented")
+        results = []
+
+        try:
+            # Determine collection based on strategy
+            collection_name = "queries-collection" if strategy == "query" else "agents-collection"
+
+            # Perform vector search
+            search_result = self.client.search(
+                collection_name=collection_name,
+                query_vector=vector,
+                limit=top_k
+            )
+
+            # Convert to expected format
+            for hit in search_result:
+                payload = hit.payload
+
+                # Map Qdrant payload to expected format
+                result = {
+                    "url": payload.get("url", ""),
+                    "json_ld": payload.get("json_ld") or payload.get("agent_json_ld", "{}"),
+                    "name": payload.get("name", "Unknown"),
+                    "site": payload.get("site", "m365")
+                }
+
+                # For query-level strategy, include agent metadata
+                if collection_name == "queries-collection":
+                    result.update({
+                        "agent_id": payload.get("agent_id", ""),
+                        "agent_name": payload.get("agent_name", ""),
+                        "agent_url": payload.get("agent_url", ""),
+                        "agent_json_ld": payload.get("agent_json_ld", "{}"),
+                        "query": payload.get("query", ""),
+                        "query_detail": payload.get("query_detail", ""),
+                        "description": payload.get("description", ""),
+                        "@search.score": hit.score  # Include search score
+                    })
+
+                results.append(result)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return []
+
+        return results
 
     async def close(self):
         """Cleanup Qdrant connections"""
+        # Qdrant client doesn't require explicit closing for local storage
         pass
 
 

@@ -35,9 +35,9 @@ class LLMBackend(ABC):
         pass
 
     @abstractmethod
-    async def rank_site(self, query: str, site_json: str) -> Dict[str, Any]:
+    async def rank_agent(self, query: str, agent_description: str) -> Dict[str, Any]:
         """
-        Rank a site for a query.
+        Rank an agent for a query.
         Returns: {"score": int, "description": str}
         """
         pass
@@ -54,7 +54,6 @@ class AzureOpenAIBackend(LLMBackend):
     def __init__(self):
         self.clients = []
         self.client_cycle = None
-        self.semaphore = asyncio.Semaphore(LLM_CONFIG["max_concurrent"])
 
     async def initialize(self):
         """Initialize Azure OpenAI clients with connection pooling"""
@@ -81,7 +80,7 @@ class AzureOpenAIBackend(LLMBackend):
                 api_key=LLM_CONFIG["api_key"],
                 api_version=LLM_CONFIG["api_version"],
                 max_retries=1,
-                timeout=10.0
+                timeout=8.0
             )
             self.clients.append(client)
 
@@ -105,50 +104,51 @@ class AzureOpenAIBackend(LLMBackend):
             # Return zero vector on error (will rank low)
             return [0.0] * 1536  # Default embedding size
 
-    async def rank_site(self, query: str, site_json: str) -> Dict[str, Any]:
-        """Rank a site using Azure OpenAI"""
-        async with self.semaphore:
-            client = next(self.client_cycle)
+    async def rank_agent(self, query: str, agent_description: str) -> Dict[str, Any]:
+        """Rank an agent using Azure OpenAI"""
+        from openai import APITimeoutError, APIError
 
-            prompt = f"""Assign a score between 0 and 100 to the following site based on the likelihood that the site will contain an answer to the user's question.
+        client = next(self.client_cycle)
 
-First think about the kind of thing the user is seeking and then verify that the site is primarily focused on that kind of thing.
+        prompt = f"""Assign a score between 0 and 100 to the following agent based on the likelihood that the agent will contain an answer to the user's question.
 
-If the user is looking to buy a product, the site should sell the product, not just have useful information.
-If the user is looking for information, the site should focus on that kind of information.
+First think about the kind of thing the user is seeking and then verify that the agent is primarily focused on that kind of thing.
 
 The user's question is: {query}
 
-The site's description is:
-{site_json}
+The agent's description is:
+{agent_description}
 
 Return JSON only with this exact format: {{"score": <integer 0-100>, "description": "<one sentence explanation>"}}"""
 
-            try:
-                response = await client.chat.completions.create(
-                    model=LLM_CONFIG["model"],
-                    messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"},
-                    temperature=0,
-                    max_tokens=100
-                )
+        try:
+            response = await client.chat.completions.create(
+                model=LLM_CONFIG["model"],
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0,
+                max_tokens=100
+            )
 
-                result = json.loads(response.choices[0].message.content)
+            result = json.loads(response.choices[0].message.content)
 
-                # Ensure required fields
-                if "score" not in result:
-                    result["score"] = 0
-                if "description" not in result:
-                    result["description"] = "No description provided"
+            # Ensure required fields
+            if "score" not in result:
+                result["score"] = 0
+            if "description" not in result:
+                result["description"] = "No description provided"
 
-                # Ensure score is an integer between 0 and 100
-                result["score"] = max(0, min(100, int(result["score"])))
+            # Ensure score is an integer between 0 and 100
+            result["score"] = max(0, min(100, int(result["score"])))
 
-                return result
+            return result
 
-            except Exception as e:
-                print(f"Ranking error: {e}")
-                return {"score": 0, "description": f"Error: {str(e)[:100]}"}
+        except APITimeoutError as e:
+            print(f"Ranking timeout (8s exceeded): {str(e)[:100]}")
+            return {"score": 0, "description": "Ranking timed out"}
+        except (APIError, Exception) as e:
+            print(f"Ranking error: {str(e)[:100]}")
+            return {"score": 0, "description": "Ranking failed"}
 
     async def close(self):
         """Cleanup - OpenAI clients don't need explicit cleanup"""
@@ -161,7 +161,6 @@ class OpenAIBackend(LLMBackend):
     def __init__(self):
         self.clients = []
         self.client_cycle = None
-        self.semaphore = asyncio.Semaphore(LLM_CONFIG["max_concurrent"])
 
     async def initialize(self):
         """Initialize OpenAI clients"""
@@ -196,10 +195,9 @@ class OpenAIBackend(LLMBackend):
 
     async def rank_site(self, query: str, site_json: str) -> Dict[str, Any]:
         """Rank a site using OpenAI"""
-        async with self.semaphore:
-            client = next(self.client_cycle)
+        client = next(self.client_cycle)
 
-            prompt = f"""Assign a score between 0 and 100 to the following site based on the likelihood that the site will contain an answer to the user's question.
+        prompt = f"""Assign a score between 0 and 100 to the following site based on the likelihood that the site will contain an answer to the user's question.
 
 The user's question is: {query}
 
@@ -208,25 +206,33 @@ The site's description is:
 
 Return JSON only: {{"score": <0-100>, "description": "<brief reason>"}}"""
 
-            try:
-                response = await client.chat.completions.create(
-                    model=LLM_CONFIG["model"],
-                    messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"},
-                    temperature=0,
-                    max_tokens=100
-                )
+        print(f"\n{'='*80}")
+        print(f"RANKING PROMPT:")
+        print(f"{'='*80}")
+        print(f"Model: {LLM_CONFIG['model']}")
+        print(f"Query: {query}")
+        print(f"Site JSON (first 500 chars): {site_json[:500]}...")
+        print(f"\nFull prompt:\n{prompt}")
+        print(f"{'='*80}\n")
 
-                result = json.loads(response.choices[0].message.content)
-                result["score"] = max(0, min(100, int(result.get("score", 0))))
-                if "description" not in result:
-                    result["description"] = "No description"
+        response = await client.chat.completions.create(
+            model=LLM_CONFIG["model"],
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0,
+            max_tokens=100
+        )
 
-                return result
+        print(f"LLM Response: {response.choices[0].message.content}")
 
-            except Exception as e:
-                print(f"Ranking error: {e}")
-                return {"score": 0, "description": f"Error: {str(e)[:100]}"}
+        result = json.loads(response.choices[0].message.content)
+        result["score"] = max(0, min(100, int(result.get("score", 0))))
+        if "description" not in result:
+            result["description"] = "No description"
+
+        print(f"Parsed result: {result}")
+
+        return result
 
     async def close(self):
         """Cleanup"""
@@ -238,7 +244,6 @@ class AnthropicBackend(LLMBackend):
 
     def __init__(self):
         self.client = None
-        self.semaphore = asyncio.Semaphore(LLM_CONFIG["max_concurrent"])
 
     async def initialize(self):
         """Initialize Anthropic client"""
