@@ -1,4 +1,42 @@
-__pycache__/
-.vscode/
-data/m365/*.tsv
-data/m365/*.ci
+# Large data files
+data/m365/agent_embeddings.csv
+agentfinder_deploy.zip
+
+# Log files
+*.log
+agent_finder.log
+agent_finder_qdrant.log
+all_models_evaluation*.log
+azure_upload*.log
+azure_upload*.txt
+detailed_eval*.txt
+eval_*.log
+multi_model_evaluation.log
+reindex_log*.txt
+regression_test*.txt
+server_*.log
+test_*.log
+
+# Evaluation results
+*_results.json
+detailed_evaluation_results.json
+
+# Query sets
+data/m365/query_sets/
+
+# Azure index definitions (local only)
+azure_index_definitions/
+
+# Scripts output
+scripts/__pycache__/
+
+# HTML reports (generated)
+code/*_comparison.html
+code/*_evaluation*.html
+code/architecture.html
+code/docs.html
+code/retrieval_strategies.html
+
+# Temporary files
+.DS_Store
+set_keys.sh

@@ -16,7 +16,7 @@ LLM_CONFIG = {
     "api_key": os.getenv("LLM_API_KEY"),  # Must be set via environment variable
     "model": os.getenv("LLM_MODEL", "gpt-4"),
     "embedding_model": os.getenv("LLM_EMBEDDING_MODEL", "text-embedding-3-large"),
-    "max_concurrent": int(os.getenv("LLM_MAX_CONCURRENT", "25")),
+    "max_concurrent": int(os.getenv("LLM_MAX_CONCURRENT", "1000")),
     "api_version": os.getenv("LLM_API_VERSION", "2024-02-01"),
 }
 
@@ -35,9 +35,13 @@ class LLMBackend(ABC):
         pass
 
     @abstractmethod
-    async def rank_agent(self, query: str, agent_description: str) -> Dict[str, Any]:
+    async def rank_augment(self, query: str, augment_description: str, model: Optional[str] = None) -> Dict[str, Any]:
         """
         Rank an agent for a query.
+        Args:
+            query: User's natural language query
+            augment_description: Agent description to rank
+            model: Optional model override (if None, uses configured model)
         Returns: {"score": int, "description": str}
         """
         pass
@@ -73,7 +77,7 @@ class AzureOpenAIBackend(LLMBackend):
             )
 
         # Create pool of clients for parallel calls
-        num_clients = min(5, LLM_CONFIG["max_concurrent"] // 5)
+        num_clients = min(100, LLM_CONFIG["max_concurrent"] // 10)
         for i in range(num_clients):
             client = AsyncAzureOpenAI(
                 azure_endpoint=LLM_CONFIG["endpoint"],
@@ -104,11 +108,14 @@ class AzureOpenAIBackend(LLMBackend):
             # Return zero vector on error (will rank low)
             return [0.0] * 1536  # Default embedding size
 
-    async def rank_agent(self, query: str, agent_description: str) -> Dict[str, Any]:
+    async def rank_augment(self, query: str, augment_description: str, model: Optional[str] = None) -> Dict[str, Any]:
         """Rank an agent using Azure OpenAI"""
         from openai import APITimeoutError, APIError
 
         client = next(self.client_cycle)
+
+        # Use provided model or fall back to configured model
+        model_to_use = model if model else LLM_CONFIG["model"]
 
         prompt = f"""Assign a score between 0 and 100 to the following agent based on the likelihood that the agent will contain an answer to the user's question.
 
@@ -117,13 +124,13 @@ First think about the kind of thing the user is seeking and then verify that the
 The user's question is: {query}
 
 The agent's description is:
-{agent_description}
+{augment_description}
 
 Return JSON only with this exact format: {{"score": <integer 0-100>, "description": "<one sentence explanation>"}}"""
 
         try:
             response = await client.chat.completions.create(
-                model=LLM_CONFIG["model"],
+                model=model_to_use,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
                 temperature=0,
@@ -167,7 +174,7 @@ class OpenAIBackend(LLMBackend):
         from openai import AsyncOpenAI
 
         # Create pool of clients
-        num_clients = min(5, LLM_CONFIG["max_concurrent"] // 5)
+        num_clients = min(100, LLM_CONFIG["max_concurrent"] // 10)
         for i in range(num_clients):
             client = AsyncOpenAI(
                 api_key=LLM_CONFIG["api_key"],
@@ -193,46 +200,42 @@ class OpenAIBackend(LLMBackend):
             print(f"Embedding error: {e}")
             return [0.0] * 1536
 
-    async def rank_site(self, query: str, site_json: str) -> Dict[str, Any]:
-        """Rank a site using OpenAI"""
+    async def rank_augment(self, query: str, augment_description: str, model: Optional[str] = None) -> Dict[str, Any]:
+        """Rank an agent using OpenAI"""
         client = next(self.client_cycle)
 
-        prompt = f"""Assign a score between 0 and 100 to the following site based on the likelihood that the site will contain an answer to the user's question.
+        # Use provided model or fall back to configured model
+        model_to_use = model if model else LLM_CONFIG["model"]
+
+        prompt = f"""Assign a score between 0 and 100 to the following agent based on the likelihood that the agent will contain an answer to the user's question.
+
+First think about the kind of thing the user is seeking and then verify that the agent is primarily focused on that kind of thing.
 
 The user's question is: {query}
 
-The site's description is:
-{site_json}
+The agent's description is:
+{augment_description}
 
-Return JSON only: {{"score": <0-100>, "description": "<brief reason>"}}"""
+Return JSON only with this exact format: {{"score": <integer 0-100>, "description": "<one sentence explanation>"}}"""
 
-        print(f"\n{'='*80}")
-        print(f"RANKING PROMPT:")
-        print(f"{'='*80}")
-        print(f"Model: {LLM_CONFIG['model']}")
-        print(f"Query: {query}")
-        print(f"Site JSON (first 500 chars): {site_json[:500]}...")
-        print(f"\nFull prompt:\n{prompt}")
-        print(f"{'='*80}\n")
+        try:
+            response = await client.chat.completions.create(
+                model=model_to_use,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0,
+                max_tokens=100
+            )
 
-        response = await client.chat.completions.create(
-            model=LLM_CONFIG["model"],
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0,
-            max_tokens=100
-        )
+            result = json.loads(response.choices[0].message.content)
+            result["score"] = max(0, min(100, int(result.get("score", 0))))
+            if "description" not in result:
+                result["description"] = "No description"
 
-        print(f"LLM Response: {response.choices[0].message.content}")
-
-        result = json.loads(response.choices[0].message.content)
-        result["score"] = max(0, min(100, int(result.get("score", 0))))
-        if "description" not in result:
-            result["description"] = "No description"
-
-        print(f"Parsed result: {result}")
-
-        return result
+            return result
+        except Exception as e:
+            print(f"Ranking error: {str(e)[:100]}")
+            return {"score": 0, "description": "Ranking failed"}
 
     async def close(self):
         """Cleanup"""
@@ -256,7 +259,7 @@ class AnthropicBackend(LLMBackend):
         """Anthropic doesn't provide embeddings - would need a separate service"""
         raise NotImplementedError("Anthropic doesn't provide embeddings - use OpenAI for embeddings")
 
-    async def rank_site(self, query: str, site_json: str) -> Dict[str, Any]:
+    async def rank_augment(self, query: str, augment_description: str, model: Optional[str] = None) -> Dict[str, Any]:
         """Rank using Claude"""
         raise NotImplementedError("Anthropic backend not yet implemented")
 

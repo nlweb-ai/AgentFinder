@@ -12,7 +12,7 @@ SEARCH_CONFIG = {
     "provider": os.getenv("SEARCH_PROVIDER", "azure"),  # azure, elasticsearch, qdrant
     "endpoint": os.getenv("SEARCH_ENDPOINT"),  # Must be set via environment variable
     "api_key": os.getenv("SEARCH_API_KEY"),  # Must be set via environment variable
-    "index": os.getenv("SEARCH_INDEX", "agents-collection"),  # Default to agent-level collection
+    "index": os.getenv("SEARCH_INDEX", "augments-collection"),  # Default to augment-level collection
 }
 
 
@@ -27,13 +27,13 @@ class SearchBackend(ABC):
     @abstractmethod
     async def search(self, query: str, vector: List[float], top_k: int = 30, strategy: str = "agent") -> List[Dict[str, Any]]:
         """
-        Search for sites.
+        Search for augments.
         Args:
             query: Search query text
             vector: Query embedding vector
             top_k: Number of results to return
-            strategy: "agent" for agent-level or "query" for query-level retrieval
-        Returns: List of {"url": str, "json_ld": str, "name": str, "site": str}
+            strategy: "agent" for augment-level or "query" for query-level retrieval
+        Returns: List of {"url": str, "json_ld": str, "name": str, "augment": str}
         """
         pass
 
@@ -141,16 +141,16 @@ class AzureSearchBackend(SearchBackend):
             # Collect results
             async for item in response:
                 if strategy == "query":
-                    # Query document fields
+                    # Query document fields - map agent_* fields from index to augment_* for internal use
                     results.append({
                         "url": item.get("url", ""),
                         "name": item.get("name", "Unknown"),
-                        "agent_id": item.get("agent_id", ""),
-                        "agent_name": item.get("agent_name", ""),
-                        "agent_url": item.get("agent_url", ""),
+                        "augment_id": item.get("agent_id", ""),
+                        "augment_name": item.get("agent_name", ""),
+                        "augment_url": item.get("agent_url", ""),
                         "query": item.get("query", ""),
                         "query_detail": item.get("query_detail", ""),
-                        "agent_json_ld": item.get("agent_json_ld", "{}"),
+                        "augment_json_ld": item.get("agent_json_ld", "{}"),
                         "description": item.get("description", "")
                     })
                 else:
@@ -216,11 +216,11 @@ class QdrantBackend(SearchBackend):
         qdrant_path = SEARCH_CONFIG.get("endpoint") or str(Path.home() / ".qdrant" / "agentfinder")
 
         # Determine collection based on index config
-        index_name = SEARCH_CONFIG.get("index", "agents-collection")
+        index_name = SEARCH_CONFIG.get("index", "augments-collection")
         if "query" in index_name.lower() or index_name == "queries-index":
             self.collection_name = "queries-collection"
         else:
-            self.collection_name = "agents-collection"
+            self.collection_name = "augments-collection"
 
         self.client = QdrantClient(path=qdrant_path)
 
@@ -231,7 +231,7 @@ class QdrantBackend(SearchBackend):
 
         try:
             # Determine collection based on strategy
-            collection_name = "queries-collection" if strategy == "query" else "agents-collection"
+            collection_name = "queries-collection" if strategy == "query" else "augments-collection"
 
             # Perform vector search
             search_result = self.client.search(
@@ -247,18 +247,18 @@ class QdrantBackend(SearchBackend):
                 # Map Qdrant payload to expected format
                 result = {
                     "url": payload.get("url", ""),
-                    "json_ld": payload.get("json_ld") or payload.get("agent_json_ld", "{}"),
+                    "json_ld": payload.get("json_ld") or payload.get("augment_json_ld", "{}"),
                     "name": payload.get("name", "Unknown"),
-                    "site": payload.get("site", "m365")
+                    "augment": payload.get("augment", "m365")
                 }
 
                 # For query-level strategy, include agent metadata
                 if collection_name == "queries-collection":
                     result.update({
-                        "agent_id": payload.get("agent_id", ""),
-                        "agent_name": payload.get("agent_name", ""),
-                        "agent_url": payload.get("agent_url", ""),
-                        "agent_json_ld": payload.get("agent_json_ld", "{}"),
+                        "augment_id": payload.get("augment_id", ""),
+                        "augment_name": payload.get("augment_name", ""),
+                        "augment_url": payload.get("augment_url", ""),
+                        "augment_json_ld": payload.get("augment_json_ld", "{}"),
                         "query": payload.get("query", ""),
                         "query_detail": payload.get("query_detail", ""),
                         "description": payload.get("description", ""),

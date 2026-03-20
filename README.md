@@ -1,8 +1,17 @@
 # WHO Standalone Handler
 
-A high-performance, modular service for finding the most relevant agents to answer user queries. This standalone implementation supports both REST and MCP (Model Context Protocol) interfaces with swappable search and LLM backends.
+A high-performance, modular service for finding the most relevant augments to answer user queries. This standalone implementation supports both REST and MCP (Model Context Protocol) interfaces with swappable search and LLM backends.
 
+**What is an Augment?**
 
+An "augment" is any capability that can extend what a user can do. This includes:
+- **Traditional agents** (HTTP endpoints that provide services)
+- **MCP tools** (Model Context Protocol tools and services)
+- **A2A skills** (Agent-to-Agent skills)
+- **Anthropic skills** (Claude-specific capabilities)
+- **Any future capability type** that might be developed
+
+All an augment needs is an endpoint, a description with metadata, and a few example queries that it can answer.
 
 ## Architecture
 
@@ -170,12 +179,13 @@ curl -X POST http://localhost:8080/clear-cache
 | `WHO_SERVER_PORT` | Server port | `8080` |
 | `WHO_SERVER_HOST` | Server host | `0.0.0.0` |
 | **WHO Handler** | | |
-| `WHO_SCORE_THRESHOLD` | Min score to include site | `70` |
+| `WHO_SCORE_THRESHOLD` | Min score to include augment | `70` |
 | `WHO_MAX_RESULTS` | Max results to return | `10` |
 | `WHO_SEARCH_TOP_K` | Sites to retrieve from search | `50` |
 | `WHO_CACHE_TTL` | Cache TTL in seconds | `3600` |
 | `WHO_MAX_CACHE_ENTRIES` | Max search cache entries | `10000` |
 | `WHO_RANKING_CACHE_ENTRIES` | Max ranking cache entries | `100000` |
+| `WHO_DEBUG` | Enable exhaustive debug logging | `false` |
 
 ## Adding New Backends
 
@@ -190,7 +200,7 @@ class MySearchBackend(SearchBackend):
         pass
 
     async def search(self, query: str, vector: List[float], top_k: int = 30) -> List[Dict[str, Any]]:
-        # Return list of {"url", "json_ld", "name", "site"}
+        # Return list of {"url", "json_ld", "name", "augment"}
         pass
 
     async def close(self):
@@ -219,7 +229,7 @@ class MyLLMBackend(LLMBackend):
         # Return embedding vector
         pass
 
-    async def rank_site(self, query: str, site_json: str) -> Dict[str, Any]:
+    async def rank_augment(self, query: str, site_json: str) -> Dict[str, Any]:
         # Return {"score": 0-100, "description": "..."}
         pass
 
@@ -236,7 +246,7 @@ The system uses three levels of caching:
 
 1. **Embedding Cache**: Never expires, embeddings are stable
 2. **Search Cache**: TTL-based, caches query → search results
-3. **Ranking Cache**: TTL-based, caches (query, site) → ranking
+3. **Ranking Cache**: TTL-based, caches (query, augment) → ranking
 
 ### Concurrency Control
 

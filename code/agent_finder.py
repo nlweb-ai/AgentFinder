@@ -93,6 +93,7 @@ async def who_endpoint(request: web.Request) -> web.Response:
 
             max_results = meta.get("max_results")
             retrieval_strategy = meta.get("strategy", "agent")
+            model = meta.get("model")  # Optional model override
 
         if not query_text:
             # Return /who protocol error response
@@ -115,7 +116,8 @@ async def who_endpoint(request: web.Request) -> web.Response:
             augment_type=augment_type,
             domain=domain,
             max_results=max_results,
-            retrieval_strategy=retrieval_strategy
+            retrieval_strategy=retrieval_strategy,
+            ranking_model=model
         )
 
         # Return /who protocol response directly
@@ -143,6 +145,98 @@ async def who_endpoint(request: web.Request) -> web.Response:
                 "code": "INTERNAL_ERROR",
                 "message": str(e)
             }
+        }, status=500)
+
+
+async def who_stream_endpoint(request: web.Request) -> web.StreamResponse:
+    """
+    SSE (Server-Sent Events) streaming endpoint for WHO queries.
+    Returns results incrementally as they complete ranking.
+
+    POST /who-stream with same request format as /who
+
+    SSE event format:
+    event: result
+    data: {"augment_name": "...", "score": 0.95, ...}
+
+    event: done
+    data: {"total_count": 5}
+    """
+    try:
+        # Parse request
+        data = await request.json()
+        query_obj = data.get("query", {})
+        meta = data.get("meta", {})
+
+        if isinstance(query_obj, str):
+            query_text = query_obj.strip()
+            augment_type = None
+            domain = None
+        else:
+            query_text = query_obj.get("text", "").strip()
+            augment_type = query_obj.get("type")
+            domain = query_obj.get("domain")
+
+        if not query_text:
+            return web.json_response({
+                "_meta": {"response_type": "failure", "version": "0.1"},
+                "error": {"code": "INVALID_QUERY", "message": "Query text is required"}
+            }, status=400)
+
+        max_results = meta.get("max_results")
+        retrieval_strategy = meta.get("strategy", "query")  # Default to query strategy for streaming
+        model = meta.get("model")
+
+        print(f"SSE Stream request: {query_text[:100]} [strategy={retrieval_strategy}]")
+
+        # Set up SSE response
+        response = web.StreamResponse()
+        response.headers['Content-Type'] = 'text/event-stream'
+        response.headers['Cache-Control'] = 'no-cache'
+        response.headers['Connection'] = 'keep-alive'
+        response.headers['X-Accel-Buffering'] = 'no'  # Disable nginx buffering
+        await response.prepare(request)
+
+        # Define callback to stream results
+        result_count = 0
+        async def stream_callback(result: dict):
+            nonlocal result_count
+            result_count += 1
+            # Send result as SSE event
+            event_data = json.dumps(result)
+            await response.write(f"event: result\ndata: {event_data}\n\n".encode('utf-8'))
+            await response.drain()
+
+        # Process query with streaming callback
+        await who_handler.who_query_stream(
+            query=query_text,
+            augment_type=augment_type,
+            domain=domain,
+            max_results=max_results,
+            retrieval_strategy=retrieval_strategy,
+            ranking_model=model,
+            stream_callback=stream_callback
+        )
+
+        # Send done event
+        done_data = json.dumps({"total_count": result_count})
+        await response.write(f"event: done\ndata: {done_data}\n\n".encode('utf-8'))
+        await response.drain()
+
+        return response
+
+    except json.JSONDecodeError:
+        return web.json_response({
+            "_meta": {"response_type": "failure", "version": "0.1"},
+            "error": {"code": "INVALID_QUERY", "message": "Invalid JSON in request body"}
+        }, status=400)
+    except Exception as e:
+        print(f"Error in WHO stream endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        return web.json_response({
+            "_meta": {"response_type": "failure", "version": "0.1"},
+            "error": {"code": "INTERNAL_ERROR", "message": str(e)}
         }, status=500)
 
 
@@ -177,7 +271,7 @@ async def mcp_endpoint(request: web.Request) -> web.Response:
                     "name": "who-standalone",
                     "version": "1.0.0"
                 },
-                "instructions": "WHO Handler - Find the most relevant sites to answer your queries"
+                "instructions": "WHO Handler - Find the most relevant augments to answer your queries"
             }
 
         elif method == "initialized" or method == "notifications/initialized":
@@ -193,7 +287,7 @@ async def mcp_endpoint(request: web.Request) -> web.Response:
             result = {
                 "tools": [{
                     "name": "who",
-                    "description": "Find agents, tools, and services that can help answer a query. Returns ranked augments with invocation details.",
+                    "description": "Find augments, tools, and services that can help answer a query. Returns ranked augments with invocation details.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -261,6 +355,7 @@ async def mcp_endpoint(request: web.Request) -> web.Response:
 
                 max_results = meta.get("max_results")
                 retrieval_strategy = meta.get("strategy", "agent")
+                model = meta.get("model")  # Optional model override
 
                 if not query_text:
                     error = {
@@ -277,7 +372,8 @@ async def mcp_endpoint(request: web.Request) -> web.Response:
                             augment_type=augment_type,
                             domain=domain,
                             max_results=max_results,
-                            retrieval_strategy=retrieval_strategy
+                            retrieval_strategy=retrieval_strategy,
+                            ranking_model=model
                         )
 
                         # Format response for MCP per /who protocol spec
@@ -371,21 +467,21 @@ async def mcp_endpoint(request: web.Request) -> web.Response:
 
 # ========== STATIC FILE SERVING ==========
 
-async def index_page(request: web.Request) -> web.Response:
-    """Serve the index.html page"""
+async def serve_html_file(request: web.Request, filename: str) -> web.Response:
+    """Serve an HTML file from the code directory"""
     try:
         # Get the directory where this script is located
         script_dir = Path(__file__).parent
-        index_path = script_dir / "index.html"
+        file_path = script_dir / filename
 
-        if not index_path.exists():
+        if not file_path.exists():
             return web.Response(
-                text="index.html not found. Please ensure index.html is in the same directory as server.py",
+                text=f"{filename} not found",
                 status=404
             )
 
         # Read and serve the HTML file
-        with open(index_path, 'r', encoding='utf-8') as f:
+        with open(file_path, 'r', encoding='utf-8') as f:
             html_content = f.read()
 
         return web.Response(
@@ -394,11 +490,41 @@ async def index_page(request: web.Request) -> web.Response:
             charset='utf-8'
         )
     except Exception as e:
-        print(f"Error serving index page: {e}")
+        print(f"Error serving {filename}: {e}")
         return web.Response(
             text=f"Error loading page: {str(e)}",
             status=500
         )
+
+
+async def index_page(request: web.Request) -> web.Response:
+    """Serve the index.html page"""
+    return await serve_html_file(request, "index.html")
+
+
+async def evaluation_report(request: web.Request) -> web.Response:
+    """Serve the evaluation_report.html page"""
+    return await serve_html_file(request, "evaluation_report.html")
+
+
+async def docs_page(request: web.Request) -> web.Response:
+    """Serve the docs.html page"""
+    return await serve_html_file(request, "docs.html")
+
+
+async def architecture_docs(request: web.Request) -> web.Response:
+    """Serve the architecture documentation"""
+    return await serve_html_file(request, "architecture.html")
+
+
+async def retrieval_strategies_docs(request: web.Request) -> web.Response:
+    """Serve the retrieval strategies documentation"""
+    return await serve_html_file(request, "retrieval_strategies.html")
+
+
+async def multi_model_evaluation_docs(request: web.Request) -> web.Response:
+    """Serve the multi-model evaluation documentation"""
+    return await serve_html_file(request, "multi_model_evaluation.html")
 
 
 # ========== ADMIN ENDPOINTS ==========
@@ -499,10 +625,16 @@ def create_app() -> web.Application:
     # Static pages
     app.router.add_get("/", index_page)
     app.router.add_get("/index.html", index_page)
+    app.router.add_get("/evaluation_report.html", evaluation_report)
+    app.router.add_get("/docs.html", docs_page)
+    app.router.add_get("/architecture.html", architecture_docs)
+    app.router.add_get("/retrieval_strategies.html", retrieval_strategies_docs)
+    app.router.add_get("/multi_model_evaluation.html", multi_model_evaluation_docs)
 
     # REST endpoints (support both GET and POST)
     app.router.add_post("/who", who_endpoint)
     app.router.add_get("/who", who_endpoint)
+    app.router.add_post("/who-stream", who_stream_endpoint)
 
     # MCP endpoints
     app.router.add_post("/mcp", mcp_endpoint)
