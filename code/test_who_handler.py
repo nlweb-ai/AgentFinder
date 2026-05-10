@@ -2,12 +2,10 @@
 Test suite for WHO handler implementation.
 Tests compliance with Who Protocol specification (Version 0.1).
 """
-import asyncio
 import json
 import pytest
 import pytest_asyncio
 from typing import Dict, Any, List
-from unittest.mock import Mock, AsyncMock, patch
 
 # Import the handler
 import who_handler

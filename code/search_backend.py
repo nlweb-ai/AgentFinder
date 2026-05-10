@@ -4,8 +4,7 @@ Implement SearchBackend class for your provider (Azure, Elasticsearch, etc.)
 """
 import os
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
-import asyncio
+from typing import List, Dict, Any
 
 # Configuration from environment variables
 SEARCH_CONFIG = {
@@ -55,7 +54,6 @@ class AzureSearchBackend(SearchBackend):
     async def initialize(self):
         """Initialize Azure Search client with connection pooling"""
         import aiohttp
-        from azure.core.credentials import AzureKeyCredential
 
         # Validate required configuration
         if not SEARCH_CONFIG["endpoint"]:
@@ -162,7 +160,7 @@ class AzureSearchBackend(SearchBackend):
                         "description": item.get("description", "")
                     })
 
-        except Exception as e:
+        except Exception:
             # Return empty results on error rather than crashing
             return []
 
@@ -267,7 +265,7 @@ class QdrantBackend(SearchBackend):
 
                 results.append(result)
 
-        except Exception as e:
+        except Exception:
             import traceback
             traceback.print_exc()
             return []

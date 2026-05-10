@@ -488,9 +488,6 @@ class WHOHandler:
             # STREAMING MODE: Stream results as they complete
             debug_log("Executing ranking tasks in STREAMING mode...")
 
-            # Create a document lookup by augment_id for quick access
-            doc_lookup = {doc["augment_id"]: doc for doc in documents}
-
             for completed_task in asyncio.as_completed(ranking_tasks):
                 try:
                     await completed_task
@@ -737,7 +734,7 @@ class WHOHandler:
                 schema_type = json_ld_data.get("@type", "Site")
             elif isinstance(json_ld_data, list) and json_ld_data:
                 schema_type = json_ld_data[0].get("@type", "Site")
-        except:
+        except (json.JSONDecodeError, TypeError, AttributeError):
             pass  # Use default if parsing fails
         return schema_type
 
@@ -764,7 +761,7 @@ class WHOHandler:
         # Parse json_ld to get protocol-specific information
         try:
             json_ld_data = json.loads(augment.get("json_ld", "{}"))
-        except:
+        except (json.JSONDecodeError, TypeError):
             json_ld_data = {}
 
         # Determine protocol based on schema type (Section 5.1)

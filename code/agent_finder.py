@@ -6,10 +6,8 @@ See who_protocol.txt for full specification.
 """
 import os
 import json
-import asyncio
 import sys
 from pathlib import Path
-from typing import Optional
 from aiohttp import web
 
 import who_handler

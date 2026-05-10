@@ -4,7 +4,6 @@ Implement LLMBackend class for your provider (Azure OpenAI, OpenAI, Anthropic, e
 """
 import os
 import json
-import asyncio
 import itertools
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
