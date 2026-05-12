@@ -7,12 +7,15 @@ See who_protocol.txt for full specification.
 import os
 import json
 import asyncio
+import logging
 import sys
 from pathlib import Path
 from typing import Optional
 from aiohttp import web
 
 import who_handler
+
+logger = logging.getLogger(__name__)
 
 # Server configuration
 PORT = int(os.getenv("WHO_SERVER_PORT", "8080"))
@@ -134,8 +137,8 @@ async def who_endpoint(request: web.Request) -> web.Response:
                 "message": "Invalid JSON in request body"
             }
         }, status=400)
-    except Exception as e:
-        print(f"Error in WHO endpoint: {e}")
+    except Exception:
+        logger.exception("Error in WHO endpoint")
         return web.json_response({
             "_meta": {
                 "response_type": "failure",
@@ -143,7 +146,7 @@ async def who_endpoint(request: web.Request) -> web.Response:
             },
             "error": {
                 "code": "INTERNAL_ERROR",
-                "message": str(e)
+                "message": "Internal server error"
             }
         }, status=500)
 
@@ -230,13 +233,11 @@ async def who_stream_endpoint(request: web.Request) -> web.StreamResponse:
             "_meta": {"response_type": "failure", "version": "0.1"},
             "error": {"code": "INVALID_QUERY", "message": "Invalid JSON in request body"}
         }, status=400)
-    except Exception as e:
-        print(f"Error in WHO stream endpoint: {e}")
-        import traceback
-        traceback.print_exc()
+    except Exception:
+        logger.exception("Error in WHO stream endpoint")
         return web.json_response({
             "_meta": {"response_type": "failure", "version": "0.1"},
-            "error": {"code": "INTERNAL_ERROR", "message": str(e)}
+            "error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}
         }, status=500)
 
 
@@ -394,11 +395,12 @@ async def mcp_endpoint(request: web.Request) -> web.Response:
                         if "error" in who_result:
                             result["error"] = who_result["error"]
 
-                    except Exception as e:
+                    except Exception:
+                        logger.exception("Error processing MCP who tool call")
                         result = {
                             "content": [{
                                 "type": "text",
-                                "text": f"Error processing query: {str(e)}"
+                                "text": "Error processing query"
                             }],
                             "_meta": {
                                 "response_type": "failure",
@@ -406,7 +408,7 @@ async def mcp_endpoint(request: web.Request) -> web.Response:
                             },
                             "error": {
                                 "code": "INTERNAL_ERROR",
-                                "message": str(e)
+                                "message": "Internal server error"
                             },
                             "isError": True
                         }
@@ -453,13 +455,13 @@ async def mcp_endpoint(request: web.Request) -> web.Response:
             },
             "id": None
         })
-    except Exception as e:
-        print(f"Error in MCP endpoint: {e}")
+    except Exception:
+        logger.exception("Error in MCP endpoint")
         return web.json_response({
             "jsonrpc": "2.0",
             "error": {
                 "code": -32603,  # Internal error
-                "message": f"Internal error: {str(e)}"
+                "message": "Internal error"
             },
             "id": data.get("id") if "data" in locals() else None
         })
@@ -489,10 +491,10 @@ async def serve_html_file(request: web.Request, filename: str) -> web.Response:
             content_type='text/html',
             charset='utf-8'
         )
-    except Exception as e:
-        print(f"Error serving {filename}: {e}")
+    except Exception:
+        logger.exception("Error serving %s", filename)
         return web.Response(
-            text=f"Error loading page: {str(e)}",
+            text="Error loading page",
             status=500
         )
 
@@ -539,10 +541,11 @@ async def health_check(request: web.Request) -> web.Response:
             "status": "healthy",
             "stats": stats
         })
-    except Exception as e:
+    except Exception:
+        logger.exception("Health check failed")
         return web.json_response({
             "status": "unhealthy",
-            "error": str(e)
+            "error": "Health check failed"
         }, status=503)
 
 
@@ -551,8 +554,9 @@ async def stats_endpoint(request: web.Request) -> web.Response:
     try:
         stats = await who_handler.get_stats()
         return web.json_response(stats)
-    except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
+    except Exception:
+        logger.exception("Error in stats endpoint")
+        return web.json_response({"error": "Internal server error"}, status=500)
 
 
 async def clear_cache_endpoint(request: web.Request) -> web.Response:
@@ -560,8 +564,9 @@ async def clear_cache_endpoint(request: web.Request) -> web.Response:
     try:
         await who_handler.clear_caches()
         return web.json_response({"status": "Caches cleared"})
-    except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
+    except Exception:
+        logger.exception("Error clearing caches")
+        return web.json_response({"error": "Internal server error"}, status=500)
 
 
 # ========== MIDDLEWARE ==========
@@ -586,13 +591,10 @@ async def error_middleware(request: web.Request, handler):
         return await handler(request)
     except web.HTTPException:
         raise
-    except Exception as e:
-        print(f"Unhandled error: {e}")
-        import traceback
-        traceback.print_exc()
+    except Exception:
+        logger.exception("Unhandled error")
         return web.json_response({
-            "error": "Internal server error",
-            "detail": str(e)
+            "error": "Internal server error"
         }, status=500)
 
 
@@ -679,6 +681,6 @@ if __name__ == "__main__":
         )
     except KeyboardInterrupt:
         print("\nServer stopped by user")
-    except Exception as e:
-        print(f"\nServer error: {e}")
+    except Exception:
+        logger.exception("Server error")
         sys.exit(1)
