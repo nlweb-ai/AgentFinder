@@ -114,6 +114,42 @@ reporting are identical to Style A. Exact CLI flags track each tool's current
 release; the contract — an HTTP MCP server exposing a single `search` tool — does
 not.
 
+## Grading on tool *selection*, not task completion (no app logins needed)
+
+Most tasks ("address my GitHub PR comments", "set up an A/B test") ultimately
+need a live account on some third-party app — and the point of the benchmark is
+**whether the right tool is identified and chosen**, not whether the downstream
+action ran. So nothing here logs into or calls the real apps. Three rungs, each
+credential-free, from cheapest to most realistic:
+
+| Rung | What it measures | Needs | Command |
+|------|------------------|-------|---------|
+| **Retrieval** | gold tool is in Finder's top-k for the prompt | a running Finder only (no agent, no LLM) | `benchmarks.selection_eval` |
+| **Agent picks it** | the agent *chooses & calls* the gold tool | + LLM keys (a stubbed executor stands in for the app) | `benchmarks.coverage_experiment` |
+| **Agent names it** | the agent *identifies* the gold tool when asked | + your agent's CLI (told to identify, not execute) | `benchmarks.runner --benchmark toolretrieval` |
+
+The lightest one runs on a small sample in seconds — no coding agent, no LLM
+keys, no app accounts:
+
+```bash
+# point at a running Finder…
+SEARCH_PROVIDER=memory WHO_SERVER_PORT=8090 python code/agent_finder.py &
+python -m benchmarks.selection_eval \
+    --tasks benchmarks/data/crossecosystem/tasks.jsonl \
+    --finder-url http://127.0.0.1:8090 --depth 30
+
+# …or let it spawn one over the sample catalog, on just the first 5 tasks:
+python -m benchmarks.selection_eval \
+    --tasks benchmarks/data/crossecosystem/tasks.jsonl \
+    --catalog-dir catalog_sample --limit 5
+```
+
+It prints the rank of each gold and `recall@{1,5,10,depth}` + MRR. A clean run on
+the bundled 10-task set: `recall@5 = 1.0`, every gold surfaced in the top-k. To
+test the *agent's* selection (rung 2/3) without touching the apps, `coverage_experiment`
+swaps in a stub executor — "solved" means the agent called the gold tool — and
+the `toolretrieval` grader (Style A above) scores the agent naming it.
+
 ## Choosing the benchmark
 
 `--benchmark` works the same way. Built-ins:
@@ -310,6 +346,7 @@ deltas reflect Agent Finder, not noise.
 | `agents.py` | reference agent adapters (`stub`, `shell`, `llm`) |
 | `suites.py` | reference benchmark suites (`sample`, `jsonl`, `toolretrieval`, `appworld`) |
 | `finder_tool.py` | client over a running Agent Finder `/search` (the treatment-arm tool) |
+| `selection_eval.py` | retrieval-only grader: is the gold tool in Finder's top-k? (no agent, no app logins) |
 | `ingest.py` | load a benchmark's tools into a Finder-servable catalog dir (reuses `scraper.base`) |
 | `runner.py` | the A/B loop + success & token delta report (`python -m benchmarks.runner`) |
 | `data/toolretrieval/` | bundled tool pool, tasks, and default toolset for the offline pilot |
