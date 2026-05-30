@@ -107,8 +107,41 @@ catalog." We decompose the win into its two causes:
 ToolLLM's full 16k RapidAPI export plugs in as a drop-in corpus (same
 `{id, prompt, gold}` shape) for an external-credibility headline run.
 
+## The measurement ladder: retrieval → agency → outcome
+
+The coverage experiment above answers "does discovery win, and at what token
+cost." But "win" bundles together three things that are worth separating, because
+a failure at any rung sinks the whole claim — and because most tasks ultimately
+need a live third-party account the person running the benchmark doesn't have.
+Every rung below is graded on **tool selection, never task completion**, so none
+of them logs into the real app (a stub executor stands in for it):
+
+1. **Retrieval — is the right tool reachable?** For each `{prompt, gold}`, does
+   Agent Finder return the gold in its top-k? Pure retrieval: no agent, no LLM,
+   no app. This is the floor — if recall is low, nothing downstream can recover.
+   Rig: `benchmarks/selection_eval.py` (`recall@{1,5,10,k}`, MRR).
+
+2. **Agency — does the agent *choose* to use it?** Retrieval being good is
+   necessary but not sufficient: a real Copilot/Codex/Claude Code with Agent
+   Finder registered as an MCP tool still has to (a) decide to call it when its
+   own toolbox falls short, and (b) decide to act on what it returns. We expose
+   Agent Finder as a `FIND` action (not pre-pasted into context) and record a
+   per-task funnel: `called_finder → used_discovered → solved`. Rig:
+   `benchmarks/discovery_eval.py` with the `discover` agent.
+
+3. **Outcome — did using it pay off?** wins/losses and trajectory tokens, split
+   by in/out-of-bundle — the coverage + token-thrash experiment specified above.
+   Rig: `benchmarks/coverage_experiment.py`.
+
+The rungs are diagnostic *together*: high retrieval recall but low
+`called_finder` means the gap is the agent's decision-making, not Agent Finder's
+index; high `called_finder` but low `solved` means it reached for the wrong tool.
+
 ## Running it
 
-The rig (`benchmarks/coverage_experiment.py`) takes the coding agent, the task
-set, the corpus/catalog, and the size sweep as arguments — nothing about the
-subject agent is baked in. See `benchmarks/README.md` for invocation.
+The rigs take the coding agent, the task set, the corpus/catalog, and (for the
+coverage experiment) the size sweep as arguments — nothing about the subject
+agent is baked in. The subject can be a reference adapter or **your own
+Copilot/Codex/Claude Code**, driven via the `shell` adapter (prompt-injection) or
+registered as an MCP server (native). See `benchmarks/README.md` for invocation
+of all three rigs and the "benchmark your own coding agent" recipes.
