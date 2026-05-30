@@ -145,10 +145,47 @@ python -m benchmarks.selection_eval \
 ```
 
 It prints the rank of each gold and `recall@{1,5,10,depth}` + MRR. A clean run on
-the bundled 10-task set: `recall@5 = 1.0`, every gold surfaced in the top-k. To
-test the *agent's* selection (rung 2/3) without touching the apps, `coverage_experiment`
-swaps in a stub executor — "solved" means the agent called the gold tool — and
-the `toolretrieval` grader (Style A above) scores the agent naming it.
+the bundled 10-task set: `recall@5 = 1.0`, every gold surfaced in the top-k.
+
+### Does the agent decide to call Finder — and use what it returns?
+
+Retrieval is necessary but not sufficient: a real Copilot/Codex/Claude Code with
+Agent Finder registered as an MCP tool still has to *choose* to call it and then
+*choose* to act on the result. `benchmarks.discovery_eval` measures that funnel.
+It runs the `discover` agent — a ReAct loop where Agent Finder is a `FIND` action
+(not pre-pasted into context) over a stubbed executor (gold solves, others
+return nothing, so no app is touched) — and reports, per task:
+
+* `called_finder` — the agent invoked `FIND` at all;
+* `used_discovered` — it then `CALL`ed a tool Finder surfaced;
+* `solved` — that tool was the gold.
+
+```bash
+source ./set_keys.sh                       # the agent needs LLM keys (no app logins)
+python -m benchmarks.discovery_eval \
+    --tasks benchmarks/data/crossecosystem/tasks.jsonl \
+    --bundle benchmarks/data/crossecosystem/default_tools.json \
+    --catalog-dir catalog_sample           # or --finder-url http://127.0.0.1:8090
+```
+
+A representative run on the 10 cross-ecosystem tasks (all out-of-bundle, so the
+agent's own 6 tools can't win — it *must* discover):
+
+```
+     partition |   n |  called   used  solved
+ out_of_bundle |  10 |     0.9    0.9     0.9
+```
+
+i.e. on 9/10 tasks the agent reached for Agent Finder, adopted what it returned,
+and solved — and the one miss (it never called `FIND`) is exactly the agency
+failure this metric is meant to catch. Pair it with `selection_eval`: if
+retrieval recall is high but `called_finder` is low, the gap is the agent's
+decision-making, not Agent Finder's index.
+
+For real coding agents in native-MCP mode (Style B), the same two behaviors are
+observable without the harness: `called_finder` = Agent Finder received a
+`tools/call` on `/mcp`; `used_discovered` = the agent then invoked one of the
+surfaced tools (log those server-side too).
 
 ## Choosing the benchmark
 
@@ -343,10 +380,11 @@ deltas reflect Agent Finder, not noise.
 | File | Role |
 |------|------|
 | `core.py` | data types (`Task`, `Attempt`, `Toolset`) + `Agent`/`Benchmark` contracts + registry/loader |
-| `agents.py` | reference agent adapters (`stub`, `shell`, `llm`) |
+| `agents.py` | reference agent adapters (`stub`, `shell`, `llm`, `loop`, `discover`) |
 | `suites.py` | reference benchmark suites (`sample`, `jsonl`, `toolretrieval`, `appworld`) |
 | `finder_tool.py` | client over a running Agent Finder `/search` (the treatment-arm tool) |
 | `selection_eval.py` | retrieval-only grader: is the gold tool in Finder's top-k? (no agent, no app logins) |
+| `discovery_eval.py` | agency funnel: does the agent call Finder (`FIND` action) and use what it returns? |
 | `ingest.py` | load a benchmark's tools into a Finder-servable catalog dir (reuses `scraper.base`) |
 | `runner.py` | the A/B loop + success & token delta report (`python -m benchmarks.runner`) |
 | `data/toolretrieval/` | bundled tool pool, tasks, and default toolset for the offline pilot |

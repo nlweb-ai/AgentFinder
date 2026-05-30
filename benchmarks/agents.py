@@ -304,3 +304,154 @@ def make_loop(model: Optional[str] = None, max_turns: int = 8,
             return self._loop.run_until_complete(self._solve_async(task, tools))
 
     return LoopAgent()
+
+
+def _parse3(line: str):
+    s = line.strip()
+    for tag in ("FIND", "CALL", "FINAL"):
+        if s.upper().startswith(tag):
+            return tag, s[len(tag):].strip()
+    return "FINAL", s  # broke protocol -> treat as final answer
+
+
+@register_agent("discover")
+def make_discover(model: Optional[str] = None, max_turns: int = 8,
+                  max_tokens: int = 512, page_size: int = 5, **_) -> Agent:
+    """ReAct agent that must DECIDE to use Agent Finder, then DECIDE to use what
+    it returns — the agency the `loop` agent skips by pre-fetching results.
+
+    Agent Finder is exposed as a first-class action (`FIND <query>`) rather than
+    pre-loaded into context. The agent sees only its shipped `default_tools`; if
+    none fit it can search the catalog, and the tools Finder returns become
+    callable on later turns. A STUBBED executor stands in for the real app (gold
+    tool solves, others return nothing), so nothing logs into a third-party
+    service. We record the behavioral funnel per task:
+
+      * called_finder      — did the agent invoke FIND at all?
+      * used_discovered    — did it then CALL a tool Finder surfaced?
+      * solved             — was that the gold tool (task done)?
+
+    This separates "the right tool was reachable" from "the agent chose to reach
+    for it and chose to use it" — the thing a real Copilot/Codex/Claude Code does
+    or doesn't do when Agent Finder is registered as an MCP tool.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "code"))
+    from llm_backend import get_llm_backend  # noqa: E402
+
+    SYSTEM = (
+        "You solve a task by calling tools. Reply with EXACTLY ONE line, no other "
+        "text:\n"
+        "  FIND <query>            -- search Agent Finder for a tool that can help\n"
+        "  CALL <tool_name> <args> -- invoke a tool you can see\n"
+        "  FINAL <answer>          -- when the task is done (or truly impossible)\n"
+        "You start with only the tools in AVAILABLE TOOLS. If none of them can do "
+        "the task, use FIND to discover one from the wider catalog, then CALL the "
+        "tool it returns. After each action you get an OBSERVATION. Do not invent "
+        "tool names; only CALL tools you can see or that FIND returned."
+    )
+
+    class DiscoverAgent:
+        name = f"discover:{model or 'default'}"
+
+        def __init__(self):
+            self._loop = asyncio.new_event_loop()
+            self._backend = None
+
+        async def _ensure(self):
+            if self._backend is None:
+                self._backend = get_llm_backend()
+                await self._backend.initialize()
+            return self._backend
+
+        async def _solve_async(self, task: Task, tools: Toolset) -> Attempt:
+            backend = await self._ensure()
+            available = list(tools.default_tools)
+            names = {a.get("name") or a.get("displayName") for a in available if a}
+            discovered_names = set()
+            finder_calls, calls, solved, output = 0, 0, False, ""
+            used_discovered = False
+
+            finder_line = ("\nYou also have FIND to search Agent Finder.\n"
+                           if tools.finder is not None else "")
+            messages = [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content":
+                    f"TASK: {task.prompt}\n{finder_line}\n## AVAILABLE TOOLS\n"
+                    f"{_render_tool_lines(available)}\n"},
+            ]
+            total_tokens = 0
+            for _turn in range(max_turns):
+                try:
+                    text, usage = await backend.generate(
+                        messages, model=model, max_tokens=max_tokens)
+                except Exception as e:
+                    return Attempt(task.id, output="", error=f"llm error: {e}")
+                total_tokens += usage["total_tokens"]
+                first = next((ln for ln in text.splitlines() if ln.strip()), text)
+                tag, rest = _parse3(first)
+
+                if tag == "FINAL":
+                    output = rest
+                    break
+
+                if tag == "FIND":
+                    obs = "OBSERVATION: Agent Finder is not available."
+                    if tools.finder is not None:
+                        finder_calls += 1
+                        try:
+                            hits = tools.finder.search(rest or task.prompt, page_size=page_size)
+                        except Exception as e:
+                            return Attempt(task.id, output="", error=f"finder error: {e}")
+                        new = []
+                        for e in hits:
+                            nm = e.get("displayName") or e.get("identifier", "?")
+                            names.add(nm)
+                            discovered_names.add(nm)
+                            new.append({"name": nm, "description": e.get("description", "")})
+                        available += new
+                        obs = ("OBSERVATION: Agent Finder returned these tools you can now CALL:\n"
+                               + (_render_tool_lines(new) if new else "(none)"))
+                    messages.append({"role": "assistant", "content": first})
+                    messages.append({"role": "user", "content": obs})
+                    continue
+
+                # tag == CALL
+                calls += 1
+                arg = rest.strip().strip('"')
+                tool = next(
+                    (n for n in sorted(names, key=len, reverse=True)
+                     if n and (arg == n or arg.startswith(n + " "))),
+                    (arg.split()[0] if arg.split() else ""),
+                )
+                if tool not in names:
+                    obs = f"OBSERVATION: no tool named '{tool}' is available."
+                elif tools.execute is not None:
+                    if tool in discovered_names:
+                        used_discovered = True
+                    obs_text, did = tools.execute(tool, {"raw": rest})
+                    obs = f"OBSERVATION: {obs_text}"
+                    if did:
+                        solved, output = True, f"[solved via {tool}] {obs_text}"
+                        messages.append({"role": "assistant", "content": first})
+                        messages.append({"role": "user", "content": obs})
+                        break
+                else:
+                    obs = "OBSERVATION: (no executor configured)"
+                messages.append({"role": "assistant", "content": first})
+                messages.append({"role": "user", "content": obs})
+
+            return Attempt(task.id, output=output, artifacts={
+                "called_finder": finder_calls > 0,
+                "finder_calls": finder_calls,
+                "used_discovered": used_discovered,
+                "discovered": sorted(discovered_names),
+                "solved": solved,
+                "agent_tokens": total_tokens,
+                "turns": _turn + 1,
+                "calls": calls,
+            })
+
+        def solve(self, task: Task, tools: Toolset) -> Attempt:
+            return self._loop.run_until_complete(self._solve_async(task, tools))
+
+    return DiscoverAgent()
