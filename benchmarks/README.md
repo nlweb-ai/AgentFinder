@@ -48,6 +48,72 @@ def make_agent(**kwargs):
     return MyAgent()
 ```
 
+## Benchmark your own coding agent (Copilot / Codex / Claude Code)
+
+The point of this harness is that **you run it against your own agent** and see
+the A/B for yourself. Nothing about Copilot, Codex, or Claude Code is special —
+each is just a CLI the harness drives. Two integration styles, same task set and
+same grader:
+
+### Style A — prompt-injection (uniform, zero per-agent code)
+
+Use the built-in `shell` adapter. The harness pipes the task prompt on stdin;
+in the **treatment** arm it appends Agent Finder's discovered augments under an
+`## AVAILABLE AUGMENTS` header; in **control** the agent sees the prompt alone.
+The *only* thing that changes between agents is one `BENCH_AGENT_CMD` string:
+
+```bash
+# 1. Serve Agent Finder (loads catalog/ from GitHub by default — no local setup).
+SEARCH_PROVIDER=memory WHO_SERVER_PORT=8090 python code/agent_finder.py &
+
+# 2. Pick your agent's non-interactive CLI (reads prompt on stdin, answer to stdout):
+export BENCH_AGENT_CMD="claude -p"          # Claude Code  (print mode)
+# export BENCH_AGENT_CMD="codex exec -"     # Codex CLI    (- = read stdin)
+# export BENCH_AGENT_CMD="copilot -p"       # Copilot CLI
+
+# 3. Run the cross-ecosystem A/B (control vs treatment, graded on the gold augment).
+BENCH_TR_TASKS=benchmarks/data/crossecosystem/tasks.jsonl \
+python -m benchmarks.runner --agent shell --benchmark toolretrieval \
+    --finder-url http://127.0.0.1:8090 --seeds 1 --out results.json
+```
+
+`--benchmark toolretrieval` reads `{id, prompt, gold}` lines (pointed at by
+`BENCH_TR_TASKS`) and scores success = the agent's output names the gold
+augment. The printed `delta_treatment_minus_control` is the lift Agent Finder
+gives *your* agent on *your* machine.
+
+If a CLI can't read the prompt from stdin, wrap it so it does — the adapter's
+only contract is "prompt in on stdin, answer out on stdout":
+
+```bash
+export BENCH_AGENT_CMD='sh -c "exec mycli --prompt \"$(cat)\""'
+```
+
+### Style B — native MCP (the agent discovers tools itself)
+
+Agent Finder already serves an MCP endpoint at `/mcp`, so instead of the harness
+injecting results you can register it in the agent's own config and let the agent
+call `search` autonomously. The A/B is then **MCP registered vs not**: run the
+control arm with a plain CLI and the treatment arm with one extra `--mcp-config`
+(or config-file) flag, and compare the two `success_rate`s.
+
+```jsonc
+// af.mcp.json — an HTTP MCP server pointing at your running Agent Finder
+{ "mcpServers": { "agent-finder": { "type": "http", "url": "http://127.0.0.1:8090/mcp" } } }
+```
+
+| Agent | Register the MCP server |
+|-------|-------------------------|
+| Claude Code | `claude -p --mcp-config af.mcp.json --allowedTools "mcp__agent-finder__search"` |
+| Codex CLI | add `[mcp_servers.agent-finder]` (`url = "http://127.0.0.1:8090/mcp"`) to `~/.codex/config.toml`, then `codex exec -` |
+| Copilot CLI | add `agent-finder` to the Copilot MCP config, then `copilot -p` |
+
+Drive each arm through the same `shell` adapter (point `BENCH_AGENT_CMD` at the
+MCP-enabled command for treatment, the plain command for control) so grading and
+reporting are identical to Style A. Exact CLI flags track each tool's current
+release; the contract — an HTTP MCP server exposing a single `search` tool — does
+not.
+
 ## Choosing the benchmark
 
 `--benchmark` works the same way. Built-ins:
