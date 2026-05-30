@@ -208,8 +208,8 @@ Two catalogs ship in the repo so a fork can run the benchmarks immediately:
 
 | Path | Size | Use |
 |------|------|-----|
-| `catalog/` | ~4.6k entries | full deduped + enriched catalog; **Agent Finder's GitHub-load default** |
-| `catalog_sample/` | ~300 entries | stratified sample containing every benchmark gold; fast local runs |
+| `catalog/` | 4,619 entries | full deduped + enriched catalog; **Agent Finder's GitHub-load default** |
+| `catalog_sample/` | 300 entries | stratified sample containing every benchmark gold; fast local runs |
 
 Agent Finder loads `catalog/` **from GitHub at startup** by default
 (`AGENT_FINDER_GITHUB_REPO=nlweb-ai/AgentFinder`, `AGENT_FINDER_GITHUB_PATH=catalog`).
@@ -275,7 +275,7 @@ python -m benchmarks.coverage_experiment \
 python -m benchmarks.coverage_experiment \
     --tasks benchmarks/data/crossecosystem/tasks.jsonl \
     --bundle benchmarks/data/crossecosystem/default_tools.json \
-    --catalog-dir catalog_sample        # or --catalog-dir catalog for the full ~4.6k
+    --catalog-dir catalog_sample        # or --catalog-dir catalog for the full 4,619
 
 # …or score against an Agent Finder you're already running (e.g. your fork's):
 python -m benchmarks.coverage_experiment \

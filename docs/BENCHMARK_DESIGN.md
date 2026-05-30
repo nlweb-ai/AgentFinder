@@ -102,7 +102,7 @@ catalog." We decompose the win into its two causes:
 |--------|------------------|-------|
 | **toolretrieval** (bundled, offline) | coverage + token-thrash, the end-to-end pilot | 15-tool universe, 6-tool bundle; 8 of 10 tasks are out-of-bundle. Runs now, no download. |
 | **distractor-scaled** (synthetic, deterministic) | scale sweep N → 10⁴ | gold + N−G synthetic tools; the only way to dial N to ToolLLM scale reproducibly. |
-| **catalog cross-ecosystem** (the real 4,793-entry catalog) | the ecosystem axis | tasks whose gold is a **skill** or **A2A agent** — wins built-in MCP tool search structurally cannot get. |
+| **catalog cross-ecosystem** (the real 4,619-entry catalog) | the ecosystem axis | tasks whose gold is a **skill** or **A2A agent** — wins built-in MCP tool search structurally cannot get. |
 
 ToolLLM's full 16k RapidAPI export plugs in as a drop-in corpus (same
 `{id, prompt, gold}` shape) for an external-credibility headline run.

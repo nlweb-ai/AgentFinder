@@ -47,7 +47,7 @@ cost; everything else moves server-side.
 
 | Axis | Client Tool Search | Agent Finder |
 |------|--------------------|--------------|
-| **Scope** | Tools you wired up (10⁰–10¹ servers) | Shared curated catalog, 10³–10⁴ entries (today: 4,793) |
+| **Scope** | Tools you wired up (10⁰–10¹ servers) | Shared curated catalog, 10³–10⁴ entries (today: 4,619) |
 | **Retriever** | Lightweight keyword/embedding, in the agent's budget | Server-side: query understanding + dense retrieval + small-LM rerank, **off** the agent's token budget |
 | **Ecosystem** | MCP servers only | MCP servers **+ skills + A2A agents + remote agents** |
 
