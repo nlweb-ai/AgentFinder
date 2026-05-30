@@ -16,8 +16,19 @@ Because every arm is the SAME entry set differing only in the embedded text
 (terse original vs marketing rewrite vs factual+queries), the delta in
 recall@k / MRR is attributable to the description treatment alone.
 
+This is a catalog-development tool: the comparison arms are different *builds* of
+the same entries (terse original vs marketing rewrite vs factual+queries), which
+you produce with scraper/dedup.py + scraper/enrich.py — they are NOT shipped in
+the repo. To simply score the shipped catalog's retrieval, give one arm pointing
+at catalog/ (or use --finder-url against a running Agent Finder).
+
 Usage:
     source ./set_keys.sh
+    # score the shipped catalog's retrieval on held-out paraphrases:
+    python -m benchmarks.retrieval_eval --arm shipped=catalog --n 60 \
+        --model gpt-5.1 --out results/retrieval_eval.json
+
+    # compare enrichment treatments (each arm is a build you make yourself):
     python -m benchmarks.retrieval_eval \
         --sample-from data/catalog_enriched2 \
         --arm terse=data/catalog_dedup \
@@ -259,8 +270,8 @@ async def run(args):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description="Held-out paraphrase retrieval eval.")
-    p.add_argument("--sample-from", default="data/catalog_enriched2",
-                   help="Catalog dir to sample golds from.")
+    p.add_argument("--sample-from", default="catalog",
+                   help="Catalog dir to sample golds from (default: the shipped catalog/).")
     p.add_argument("--arm", action="append", default=[],
                    help="name=catalog_dir (repeatable). Each arm is served and scored.")
     p.add_argument("--finder-url", help="Also score an already-running Agent Finder at this URL "

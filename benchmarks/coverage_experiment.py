@@ -22,7 +22,8 @@ Two corpus modes:
   * ingest mode (--tool-descs + --sizes): build a catalog of the gold tools plus
     N-G synthetic distractors, ingest it, serve it. Sweep N to ToolLLM scale.
   * existing-catalog mode (--catalog-dir): serve a pre-built catalog as-is
-    (e.g. data/catalog_manifest for the cross-ecosystem run). No size sweep.
+    (e.g. the shipped catalog_sample/ or catalog/ for the cross-ecosystem run).
+    No size sweep.
 
 Usage:
     source ./set_keys.sh
@@ -33,11 +34,11 @@ Usage:
         --tool-descs benchmarks/data/toolretrieval/tools.json \
         --sizes 15,150,1500
 
-    # cross-ecosystem run against the real catalog:
+    # cross-ecosystem run against the shipped catalog:
     python -m benchmarks.coverage_experiment \
         --tasks benchmarks/data/crossecosystem/tasks.jsonl \
         --bundle benchmarks/data/crossecosystem/default_tools.json \
-        --catalog-dir data/catalog_manifest
+        --catalog-dir catalog_sample        # or catalog/ for the full 4,619
 """
 from __future__ import annotations
 

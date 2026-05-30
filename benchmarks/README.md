@@ -240,9 +240,10 @@ augments it returns must be usable in the benchmark task. Two supported modes:
    SEARCH_PROVIDER=memory AGENT_FINDER_CATALOG_DIR=data/bench_toolretrieval \
        WHO_SERVER_PORT=8096 python code/agent_finder.py &
    ```
-2. **Use the existing scraped catalog** (`data/catalog_manifest`). Only valid for
-   tasks solvable with the real public MCP servers/skills/agents already indexed;
-   otherwise the discovered augments can't complete the task and the delta is noise.
+2. **Use the shipped catalog** (`catalog/`, or `catalog_sample/` for fast runs).
+   Only valid for tasks solvable with the real public MCP servers/skills/agents
+   already indexed; otherwise the discovered augments can't complete the task and
+   the delta is noise.
 
 Either way the harness just talks to a Finder URL — `--finder-url` selects which
 catalog is in play.
@@ -348,7 +349,7 @@ pointing `BENCH_TR_TASKS` / the `tasks` arg at a full ToolBench or ToolRet expor
 
 ```bash
 # 1. Start an Agent Finder instance (treatment arm talks to it over /search).
-SEARCH_PROVIDER=memory AGENT_FINDER_CATALOG_DIR=data/catalog_manifest \
+SEARCH_PROVIDER=memory AGENT_FINDER_CATALOG_DIR=catalog_sample \
     WHO_SERVER_PORT=8090 python code/agent_finder.py &
 
 # 2. Smoke-test the wiring (no tokens, no external agent).
