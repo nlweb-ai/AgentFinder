@@ -1,566 +1,372 @@
 """
-Web server with REST and MCP endpoints for WHO handler.
-Implements the Who Protocol specification (Version 0.1).
+Web server exposing the Agent Finder REST API (specification v0.5).
 
-See who_protocol.txt for full specification.
+Endpoints:
+  POST /search           Ranked discovery over catalog entries (§7.2)
+  POST /explore          Facet aggregation over the matched set (§7.3)
+  GET  /agents           Deterministic browsing (§7.4)
+  POST /mcp              MCP protocol wrapper for search (§7.5)
+  POST /a2a              A2A skill wrapper for search (§7.5, provisional)
+  GET  /.well-known/ai-catalog.json   Self-describing registry manifest (§6.1)
+  GET  /.well-known/agent-card.json   A2A agent card for the search skill
+
+Admin: GET /health, GET /stats, POST /clear-cache.
 """
 import os
 import json
-import asyncio
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
 from aiohttp import web
 
 import who_handler
+from who_handler import AgentFinderError, ERROR_CODES, SPEC_VERSION
 
 logger = logging.getLogger(__name__)
 
 # Server configuration
 PORT = int(os.getenv("WHO_SERVER_PORT", "8080"))
 HOST = os.getenv("WHO_SERVER_HOST", "0.0.0.0")
+MCP_ENABLED = os.getenv("MCP_ENABLED", "true").lower() == "true"
+A2A_ENABLED = os.getenv("A2A_ENABLED", "true").lower() == "true"
 
-# MCP Protocol version
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
 
-# ========== REST ENDPOINTS ==========
+# ========== Helpers ==========
 
-async def who_endpoint(request: web.Request) -> web.Response:
-    """
-    REST endpoint for WHO queries per /who protocol specification (Section 7).
-    Supports both GET and POST requests.
+def _error_response(code: str, message: str = None) -> web.Response:
+    """Build a standard error response (Appendix B)."""
+    http_status, default_msg = ERROR_CODES.get(code, (500, "Unknown error"))
+    return web.json_response(
+        {"error": {"code": code, "message": message or default_msg}},
+        status=http_status,
+    )
 
-    Request format (POST) per Section 3:
-    {
-        "query": {
-            "text": "natural language query",
-            "type": "A2AAgent",    // optional - filter by augment type
-            "domain": "recipes",   // optional - filter by domain
-            "capabilities": []     // optional - required capabilities
-        },
-        "meta": {
-            "version": "0.1",
-            "max_results": 10      // optional
-        }
-    }
 
-    Also supports legacy format:
-    {
-        "query": "natural language query"
-    }
+def _normalize_filter(filt):
+    """Coerce bare scalars to single-element arrays per §7.1."""
+    if not isinstance(filt, dict):
+        return None
+    return {k: (v if isinstance(v, list) else [v]) for k, v in filt.items()}
 
-    Response format per Section 6:
-    {
-        "_meta": {
-            "response_type": "answer",
-            "version": "0.1",
-            "result_count": N
-        },
-        "results": [...]
-    }
-    """
+
+# ========== REST: /search (§7.2) ==========
+
+async def search_endpoint(request: web.Request) -> web.Response:
     try:
-        # Support both GET and POST requests
-        if request.method == "GET":
-            # Get query from URL parameters (legacy format)
-            query_text = request.query.get("query", "").strip()
-            augment_type = request.query.get("type")
-            domain = request.query.get("domain")
-            retrieval_strategy = request.query.get("strategy", "agent")
-            max_results = request.query.get("max_results")
-            if max_results:
-                try:
-                    max_results = int(max_results)
-                except ValueError:
-                    max_results = None
-        else:
-            # Parse JSON request body for POST
-            data = await request.json()
-
-            # Support both new /who protocol format and legacy format
-            query_obj = data.get("query", {})
-            meta = data.get("meta", {})
-
-            if isinstance(query_obj, str):
-                # Legacy format: query is a string
-                query_text = query_obj.strip()
-                augment_type = None
-                domain = None
-            else:
-                # New /who protocol format: query is an object
-                query_text = query_obj.get("text", "").strip()
-                augment_type = query_obj.get("type")
-                domain = query_obj.get("domain")
-
-            max_results = meta.get("max_results")
-            retrieval_strategy = meta.get("strategy", "agent")
-            model = meta.get("model")  # Optional model override
-
-        if not query_text:
-            # Return /who protocol error response
-            return web.json_response({
-                "_meta": {
-                    "response_type": "failure",
-                    "version": "0.1"
-                },
-                "error": {
-                    "code": "INVALID_QUERY",
-                    "message": "Query text is required"
-                }
-            }, status=400)
-
-        print(f"REST request ({request.method}): {query_text[:100]} [strategy={retrieval_strategy}]")
-
-        # Process query with /who protocol parameters
-        result = await who_handler.who_query(
-            query=query_text,
-            augment_type=augment_type,
-            domain=domain,
-            max_results=max_results,
-            retrieval_strategy=retrieval_strategy,
-            ranking_model=model
-        )
-
-        # Return /who protocol response directly
-        return web.json_response(result)
-
-    except json.JSONDecodeError:
-        return web.json_response({
-            "_meta": {
-                "response_type": "failure",
-                "version": "0.1"
-            },
-            "error": {
-                "code": "INVALID_QUERY",
-                "message": "Invalid JSON in request body"
-            }
-        }, status=400)
-    except Exception:
-        logger.exception("Error in WHO endpoint")
-        return web.json_response({
-            "_meta": {
-                "response_type": "failure",
-                "version": "0.1"
-            },
-            "error": {
-                "code": "INTERNAL_ERROR",
-                "message": "Internal server error"
-            }
-        }, status=500)
-
-
-async def who_stream_endpoint(request: web.Request) -> web.StreamResponse:
-    """
-    SSE (Server-Sent Events) streaming endpoint for WHO queries.
-    Returns results incrementally as they complete ranking.
-
-    POST /who-stream with same request format as /who
-
-    SSE event format:
-    event: result
-    data: {"augment_name": "...", "score": 0.95, ...}
-
-    event: done
-    data: {"total_count": 5}
-    """
-    try:
-        # Parse request
         data = await request.json()
-        query_obj = data.get("query", {})
-        meta = data.get("meta", {})
-
-        if isinstance(query_obj, str):
-            query_text = query_obj.strip()
-            augment_type = None
-            domain = None
-        else:
-            query_text = query_obj.get("text", "").strip()
-            augment_type = query_obj.get("type")
-            domain = query_obj.get("domain")
-
-        if not query_text:
-            return web.json_response({
-                "_meta": {"response_type": "failure", "version": "0.1"},
-                "error": {"code": "INVALID_QUERY", "message": "Query text is required"}
-            }, status=400)
-
-        max_results = meta.get("max_results")
-        retrieval_strategy = meta.get("strategy", "query")  # Default to query strategy for streaming
-        model = meta.get("model")
-
-        print(f"SSE Stream request: {query_text[:100]} [strategy={retrieval_strategy}]")
-
-        # Set up SSE response
-        response = web.StreamResponse()
-        response.headers['Content-Type'] = 'text/event-stream'
-        response.headers['Cache-Control'] = 'no-cache'
-        response.headers['Connection'] = 'keep-alive'
-        response.headers['X-Accel-Buffering'] = 'no'  # Disable nginx buffering
-        await response.prepare(request)
-
-        # Define callback to stream results
-        result_count = 0
-        async def stream_callback(result: dict):
-            nonlocal result_count
-            result_count += 1
-            # Send result as SSE event
-            event_data = json.dumps(result)
-            await response.write(f"event: result\ndata: {event_data}\n\n".encode('utf-8'))
-            await response.drain()
-
-        # Process query with streaming callback
-        await who_handler.who_query_stream(
-            query=query_text,
-            augment_type=augment_type,
-            domain=domain,
-            max_results=max_results,
-            retrieval_strategy=retrieval_strategy,
-            ranking_model=model,
-            stream_callback=stream_callback
-        )
-
-        # Send done event
-        done_data = json.dumps({"total_count": result_count})
-        await response.write(f"event: done\ndata: {done_data}\n\n".encode('utf-8'))
-        await response.drain()
-
-        return response
-
     except json.JSONDecodeError:
-        return web.json_response({
-            "_meta": {"response_type": "failure", "version": "0.1"},
-            "error": {"code": "INVALID_QUERY", "message": "Invalid JSON in request body"}
-        }, status=400)
+        return _error_response("INVALID_ARGUMENT", "Invalid JSON in request body")
+
+    query = data.get("query", {})
+    if not isinstance(query, dict):
+        return _error_response("INVALID_ARGUMENT", "query must be an object with a 'text' field")
+
+    text = (query.get("text") or "").strip()
+    filt = _normalize_filter(query.get("filter"))
+    federation = data.get("federation", "auto")
+    page_size = data.get("pageSize")
+    page_token = data.get("pageToken")
+
+    print(f"/search: text={text[:80]!r} federation={federation} filter={bool(filt)}")
+    try:
+        result = await who_handler.search(text, filt, federation, page_size, page_token)
+        return web.json_response(result)
+    except AgentFinderError as e:
+        return _error_response(e.code, e.message)
     except Exception:
-        logger.exception("Error in WHO stream endpoint")
-        return web.json_response({
-            "_meta": {"response_type": "failure", "version": "0.1"},
-            "error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}
-        }, status=500)
+        # Log server-side; don't leak exception text to the client.
+        logger.exception("Error in /search")
+        return _error_response("INTERNAL_ERROR")
 
 
-# ========== MCP ENDPOINTS ==========
+# ========== REST: /explore (§7.3) ==========
+
+async def explore_endpoint(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+    except json.JSONDecodeError:
+        return _error_response("INVALID_ARGUMENT", "Invalid JSON in request body")
+
+    query = data.get("query", {}) or {}
+    text = (query.get("text") or "").strip() if isinstance(query, dict) else ""
+    filt = _normalize_filter(query.get("filter")) if isinstance(query, dict) else None
+    result_type = data.get("resultType", {})
+    facets = result_type.get("facets") if isinstance(result_type, dict) else None
+
+    if not facets:
+        return _error_response("INVALID_ARGUMENT", "resultType.facets is required")
+
+    print(f"/explore: text={text[:80]!r} facets={[f.get('field') for f in facets]}")
+    try:
+        result = await who_handler.explore(text or None, filt, facets)
+        return web.json_response(result)
+    except AgentFinderError as e:
+        return _error_response(e.code, e.message)
+    except Exception:
+        logger.exception("Error in /explore")
+        return _error_response("INTERNAL_ERROR")
+
+
+# ========== REST: GET /agents (§7.4) ==========
+
+async def agents_endpoint(request: web.Request) -> web.Response:
+    q = request.query
+    filters = {
+        k: q[k] for k in ("displayName", "type", "publisherId", "createdAfter", "updatedAfter")
+        if k in q
+    }
+    order_by = q.get("orderBy")
+    page_token = q.get("pageToken")
+    try:
+        page_size = int(q.get("pageSize", "20"))
+    except ValueError:
+        return _error_response("INVALID_ARGUMENT", "pageSize must be an integer")
+
+    try:
+        result = await who_handler.list_agents(filters, order_by, page_size, page_token)
+        return web.json_response(result)
+    except AgentFinderError as e:
+        return _error_response(e.code, e.message)
+    except Exception:
+        logger.exception("Error in /agents")
+        return _error_response("INTERNAL_ERROR")
+
+
+# ========== MCP wrapper (§7.5) ==========
+
+SEARCH_TOOL_SCHEMA = {
+    "name": "search",
+    "description": (
+        "Discover agents, MCP servers, skills, and other AI capabilities relevant to a "
+        "natural-language need. Returns ranked catalog entries."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Natural-language description of the need"},
+                    "filter": {"type": "object", "description": "Structured constraints (field path -> values)"},
+                },
+                "required": ["text"],
+            },
+            "federation": {"type": "string", "enum": ["auto", "referrals", "none"]},
+            "pageSize": {"type": "integer"},
+        },
+        "required": ["query"],
+    },
+}
+
 
 async def mcp_endpoint(request: web.Request) -> web.Response:
-    """MCP protocol endpoint supporting JSON-RPC 2.0"""
+    """MCP JSON-RPC 2.0 wrapper exposing the search tool."""
     try:
-        # Parse JSON-RPC request
         data = await request.json()
-        method = data.get("method")
-        params = data.get("params", {})
-        request_id = data.get("id")
-        jsonrpc = data.get("jsonrpc", "2.0")
+    except json.JSONDecodeError:
+        return web.json_response({
+            "jsonrpc": "2.0",
+            "error": {"code": -32700, "message": "Parse error: Invalid JSON"},
+            "id": None,
+        })
 
-        print(f"MCP request: method={method}, id={request_id}")
+    method = data.get("method")
+    params = data.get("params", {})
+    request_id = data.get("id")
+    is_notification = request_id is None
+    result = None
+    error = None
 
-        # Check if this is a notification (no id)
-        is_notification = request_id is None
-
-        result = None
-        error = None
-
-        # Route MCP methods
+    try:
         if method == "initialize":
             result = {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {
-                    "tools": {}
-                },
-                "serverInfo": {
-                    "name": "who-standalone",
-                    "version": "1.0.0"
-                },
-                "instructions": "WHO Handler - Find the most relevant augments to answer your queries"
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "agent-finder", "version": SPEC_VERSION},
+                "instructions": "Agent Finder - discover AI capabilities relevant to a query",
             }
-
-        elif method == "initialized" or method == "notifications/initialized":
-            # Notification that client is ready
-            if not is_notification:
-                result = {"status": "ok"}
-            else:
-                # Notifications don't get responses
+        elif method in ("initialized", "notifications/initialized"):
+            if is_notification:
                 return web.Response(status=204)
-
+            result = {"status": "ok"}
+        elif method == "notifications/cancelled":
+            return web.Response(status=204)
         elif method == "tools/list":
-            # MCP tool definition per /who protocol specification (Section 8.1)
-            result = {
-                "tools": [{
-                    "name": "who",
-                    "description": "Find augments, tools, and services that can help answer a query. Returns ranked augments with invocation details.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "object",
-                                "description": "The query specifying what augments are needed",
-                                "properties": {
-                                    "text": {
-                                        "type": "string",
-                                        "description": "Natural language description of the need"
-                                    },
-                                    "type": {
-                                        "type": "string",
-                                        "description": "Filter by augment type (e.g., A2AAgent, MCPTool, Skill)"
-                                    },
-                                    "domain": {
-                                        "type": "string",
-                                        "description": "Filter by domain (e.g., recipes, travel, finance)"
-                                    },
-                                    "capabilities": {
-                                        "type": "array",
-                                        "items": {"type": "string"},
-                                        "description": "Required capabilities"
-                                    }
-                                },
-                                "required": ["text"]
-                            },
-                            "meta": {
-                                "type": "object",
-                                "description": "Request metadata",
-                                "properties": {
-                                    "version": {"type": "string"},
-                                    "max_results": {"type": "integer"},
-                                    "strategy": {
-                                        "type": "string",
-                                        "description": "Retrieval strategy: 'agent' (default) or 'query'",
-                                        "enum": ["agent", "query"]
-                                    }
-                                }
-                            }
-                        },
-                        "required": ["query"]
-                    }
-                }]
-            }
-
+            result = {"tools": [SEARCH_TOOL_SCHEMA]}
         elif method == "tools/call":
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
-
-            if tool_name == "who":
-                # Parse /who protocol request format
-                query_obj = arguments.get("query", {})
-                meta = arguments.get("meta", {})
-
-                # Support both new format (object) and legacy format (string)
-                if isinstance(query_obj, str):
-                    query_text = query_obj.strip()
-                    augment_type = None
-                    domain = None
-                else:
-                    query_text = query_obj.get("text", "").strip()
-                    augment_type = query_obj.get("type")
-                    domain = query_obj.get("domain")
-
-                max_results = meta.get("max_results")
-                retrieval_strategy = meta.get("strategy", "agent")
-                model = meta.get("model")  # Optional model override
-
-                if not query_text:
-                    error = {
-                        "code": -32602,  # Invalid params
-                        "message": "Query text is required"
-                    }
-                else:
-                    print(f"MCP tool call: who query='{query_text[:100]}' [strategy={retrieval_strategy}]")
-
-                    # Process the query with /who protocol parameters
-                    try:
-                        who_result = await who_handler.who_query(
-                            query=query_text,
-                            augment_type=augment_type,
-                            domain=domain,
-                            max_results=max_results,
-                            retrieval_strategy=retrieval_strategy,
-                            ranking_model=model
-                        )
-
-                        # Format response for MCP per /who protocol spec
-                        # Include the full /who response structure
-                        is_error = who_result.get("_meta", {}).get("response_type") == "failure"
-
-                        result = {
-                            "content": [{
-                                "type": "text",
-                                "text": f"Found {who_result.get('_meta', {}).get('result_count', 0)} augments that can help"
-                            }],
-                            "_meta": who_result.get("_meta"),
-                            "results": who_result.get("results", []),
-                            "isError": is_error
-                        }
-
-                        # Include error info if present
-                        if "error" in who_result:
-                            result["error"] = who_result["error"]
-
-                    except Exception:
-                        logger.exception("Error processing MCP who tool call")
-                        result = {
-                            "content": [{
-                                "type": "text",
-                                "text": "Error processing query"
-                            }],
-                            "_meta": {
-                                "response_type": "failure",
-                                "version": "0.1"
-                            },
-                            "error": {
-                                "code": "INTERNAL_ERROR",
-                                "message": "Internal server error"
-                            },
-                            "isError": True
-                        }
+            if tool_name != "search":
+                error = {"code": -32601, "message": f"Unknown tool: {tool_name}"}
             else:
-                error = {
-                    "code": -32601,  # Method not found
-                    "message": f"Unknown tool: {tool_name}"
-                }
-
-        elif method == "notifications/cancelled":
-            # Handle cancellation notification
-            request_id_to_cancel = params.get("requestId")
-            reason = params.get("reason", "Unknown")
-            print(f"Received cancellation for request {request_id_to_cancel}: {reason}")
-            # Notifications don't get responses
-            return web.Response(status=204)
-
+                query = arguments.get("query", {})
+                text = (query.get("text") or "").strip() if isinstance(query, dict) else ""
+                filt = _normalize_filter(query.get("filter")) if isinstance(query, dict) else None
+                federation = arguments.get("federation", "none")
+                page_size = arguments.get("pageSize")
+                if not text:
+                    error = {"code": -32602, "message": "query.text is required"}
+                else:
+                    search_result = await who_handler.search(text, filt, federation, page_size)
+                    results = search_result.get("results", [])
+                    result = {
+                        "content": [{"type": "text", "text": f"Found {len(results)} matching capabilities"}],
+                        "results": results,
+                        "isError": False,
+                    }
+                    for k in ("referrals", "pageToken"):
+                        if k in search_result:
+                            result[k] = search_result[k]
         else:
-            error = {
-                "code": -32601,  # Method not found
-                "message": f"Method not found: {method}"
-            }
-
-        # Build JSON-RPC response
-        response = {"jsonrpc": jsonrpc}
-
-        if error:
-            response["error"] = error
-        else:
-            response["result"] = result
-
-        # Include id for non-notifications
-        if not is_notification:
-            response["id"] = request_id
-
-        return web.json_response(response)
-
-    except json.JSONDecodeError:
-        return web.json_response({
-            "jsonrpc": "2.0",
-            "error": {
-                "code": -32700,  # Parse error
-                "message": "Parse error: Invalid JSON"
-            },
-            "id": None
-        })
+            error = {"code": -32601, "message": f"Method not found: {method}"}
+    except AgentFinderError as e:
+        error = {"code": -32602, "message": e.message}
     except Exception:
-        logger.exception("Error in MCP endpoint")
-        return web.json_response({
-            "jsonrpc": "2.0",
-            "error": {
-                "code": -32603,  # Internal error
-                "message": "Internal error"
-            },
-            "id": data.get("id") if "data" in locals() else None
-        })
+        # Log server-side; don't leak exception text to the client.
+        logger.exception("Error in /mcp")
+        error = {"code": -32603, "message": "Internal error"}
+
+    response = {"jsonrpc": "2.0"}
+    if error:
+        response["error"] = error
+    else:
+        response["result"] = result
+    if not is_notification:
+        response["id"] = request_id
+    return web.json_response(response)
 
 
-# ========== STATIC FILE SERVING ==========
+# ========== A2A wrapper (§7.5, provisional request format) ==========
+
+async def a2a_endpoint(request: web.Request) -> web.Response:
+    """A2A skill wrapper for search. Returns spec catalog entries.
+
+    Request shape is provisional (§7.5): accepts {text, filter, federation, pageSize}
+    or a nested {query: {text, filter}, ...}.
+    """
+    try:
+        data = await request.json()
+    except json.JSONDecodeError:
+        return _error_response("INVALID_ARGUMENT", "Invalid JSON in request body")
+
+    query = data.get("query") if isinstance(data.get("query"), dict) else data
+    text = (query.get("text") or "").strip()
+    filt = _normalize_filter(query.get("filter"))
+    federation = data.get("federation", "none")
+    page_size = data.get("pageSize")
+
+    try:
+        result = await who_handler.search(text, filt, federation, page_size)
+        return web.json_response(result)
+    except AgentFinderError as e:
+        return _error_response(e.code, e.message)
+    except Exception:
+        logger.exception("Error in /a2a")
+        return _error_response("INTERNAL_ERROR")
+
+
+# ========== Well-known discovery documents (§6.1) ==========
+
+def _base_url(request: web.Request) -> str:
+    configured = os.getenv("AGENT_FINDER_SOURCE")
+    if configured:
+        return configured.rstrip("/")
+    return f"{request.scheme}://{request.host}"
+
+
+async def ai_catalog_manifest(request: web.Request) -> web.Response:
+    """Self-describing manifest advertising this registry's search interface."""
+    base = _base_url(request)
+    manifest = {
+        "specVersion": "1.0",
+        "host": {"displayName": os.getenv("AGENT_FINDER_HOST_NAME", "Agent Finder")},
+        "entries": [
+            {
+                "identifier": os.getenv("AGENT_FINDER_IDENTIFIER", "urn:ai:agentfinder.local:registry:default"),
+                "displayName": os.getenv("AGENT_FINDER_HOST_NAME", "Agent Finder"),
+                "type": "application/ai-registry+json",
+                "url": f"{base}/search",
+                "description": "REST search interface for discovering AI capabilities.",
+                "tags": ["registry", "search", "dynamic"],
+            }
+        ],
+    }
+    return web.json_response(manifest)
+
+
+async def agent_card(request: web.Request) -> web.Response:
+    """A2A agent card describing the search skill."""
+    base = _base_url(request)
+    card = {
+        "name": os.getenv("AGENT_FINDER_HOST_NAME", "Agent Finder"),
+        "description": "Discover AI capabilities (agents, MCP servers, skills) relevant to a query.",
+        "url": f"{base}/a2a",
+        "version": SPEC_VERSION,
+        "skills": [
+            {
+                "id": "search",
+                "name": "Capability Search",
+                "description": "Return catalog entries ranked by relevance to a natural-language need.",
+            }
+        ],
+    }
+    return web.json_response(card)
+
+
+# ========== Static file serving ==========
 
 async def serve_html_file(request: web.Request, filename: str) -> web.Response:
-    """Serve an HTML file from the code directory"""
     try:
-        # Get the directory where this script is located
-        script_dir = Path(__file__).parent
-        file_path = script_dir / filename
-
+        file_path = Path(__file__).parent / filename
         if not file_path.exists():
-            return web.Response(
-                text=f"{filename} not found",
-                status=404
-            )
-
-        # Read and serve the HTML file
-        with open(file_path, 'r', encoding='utf-8') as f:
-            html_content = f.read()
-
-        return web.Response(
-            text=html_content,
-            content_type='text/html',
-            charset='utf-8'
-        )
+            return web.Response(text=f"{filename} not found", status=404)
+        with open(file_path, "r", encoding="utf-8") as f:
+            return web.Response(text=f.read(), content_type="text/html", charset="utf-8")
     except Exception:
+        # Log server-side; don't leak exception text (e.g. filesystem paths) to
+        # the client over this browser-reachable route. (CodeQL py/stack-trace-exposure)
         logger.exception("Error serving %s", filename)
-        return web.Response(
-            text="Error loading page",
-            status=500
-        )
+        return web.Response(text="Internal server error", status=500)
 
 
 async def index_page(request: web.Request) -> web.Response:
-    """Serve the index.html page"""
     return await serve_html_file(request, "index.html")
 
 
-async def evaluation_report(request: web.Request) -> web.Response:
-    """Serve the evaluation_report.html page"""
-    return await serve_html_file(request, "evaluation_report.html")
-
-
 async def docs_page(request: web.Request) -> web.Response:
-    """Serve the docs.html page"""
     return await serve_html_file(request, "docs.html")
 
 
 async def architecture_docs(request: web.Request) -> web.Response:
-    """Serve the architecture documentation"""
     return await serve_html_file(request, "architecture.html")
 
 
 async def retrieval_strategies_docs(request: web.Request) -> web.Response:
-    """Serve the retrieval strategies documentation"""
     return await serve_html_file(request, "retrieval_strategies.html")
 
 
-async def multi_model_evaluation_docs(request: web.Request) -> web.Response:
-    """Serve the multi-model evaluation documentation"""
-    return await serve_html_file(request, "multi_model_evaluation.html")
-
-
-# ========== ADMIN ENDPOINTS ==========
+# ========== Admin ==========
 
 async def health_check(request: web.Request) -> web.Response:
-    """Health check endpoint"""
     try:
-        # Get handler stats
         stats = await who_handler.get_stats()
-
-        return web.json_response({
-            "status": "healthy",
-            "stats": stats
-        })
+        return web.json_response({"status": "healthy", "stats": stats})
     except Exception:
         logger.exception("Health check failed")
-        return web.json_response({
-            "status": "unhealthy",
-            "error": "Health check failed"
-        }, status=503)
+        return web.json_response({"status": "unhealthy", "error": "Health check failed"}, status=503)
 
 
 async def stats_endpoint(request: web.Request) -> web.Response:
-    """Statistics endpoint"""
     try:
-        stats = await who_handler.get_stats()
-        return web.json_response(stats)
+        return web.json_response(await who_handler.get_stats())
     except Exception:
         logger.exception("Error in stats endpoint")
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
 async def clear_cache_endpoint(request: web.Request) -> web.Response:
-    """Clear all caches"""
     try:
         await who_handler.clear_caches()
         return web.json_response({"status": "Caches cleared"})
@@ -569,116 +375,95 @@ async def clear_cache_endpoint(request: web.Request) -> web.Response:
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
-# ========== MIDDLEWARE ==========
+# ========== Middleware ==========
 
 @web.middleware
 async def cors_middleware(request: web.Request, handler):
-    """Add CORS headers to responses"""
-    response = await handler(request)
-
-    # Add CORS headers
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-
+    if request.method == "OPTIONS":
+        response = web.Response(status=204)
+    else:
+        response = await handler(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return response
 
 
 @web.middleware
 async def error_middleware(request: web.Request, handler):
-    """Global error handler"""
     try:
         return await handler(request)
     except web.HTTPException:
         raise
     except Exception:
         logger.exception("Unhandled error")
-        return web.json_response({
-            "error": "Internal server error"
-        }, status=500)
+        return _error_response("INTERNAL_ERROR")
 
 
-# ========== APP LIFECYCLE ==========
+# ========== Lifecycle ==========
 
 async def startup(app: web.Application):
-    """Initialize handler on startup"""
-    print(f"Starting WHO server on {HOST}:{PORT}")
-    print("Initializing handler...")
-
-    # Initialize the handler (creates connections, etc.)
+    print(f"Starting Agent Finder on {HOST}:{PORT}")
     await who_handler.get_handler()
-
-    print("Server ready to accept requests")
+    print("Server ready")
 
 
 async def cleanup(app: web.Application):
-    """Cleanup on shutdown"""
-    print("Shutting down server...")
+    print("Shutting down...")
     await who_handler.cleanup()
-    print("Server shutdown complete")
 
-
-# ========== APPLICATION SETUP ==========
 
 def create_app() -> web.Application:
-    """Create the web application"""
     app = web.Application(middlewares=[error_middleware, cors_middleware])
 
     # Static pages
     app.router.add_get("/", index_page)
     app.router.add_get("/index.html", index_page)
-    app.router.add_get("/evaluation_report.html", evaluation_report)
     app.router.add_get("/docs.html", docs_page)
     app.router.add_get("/architecture.html", architecture_docs)
     app.router.add_get("/retrieval_strategies.html", retrieval_strategies_docs)
-    app.router.add_get("/multi_model_evaluation.html", multi_model_evaluation_docs)
 
-    # REST endpoints (support both GET and POST)
-    app.router.add_post("/who", who_endpoint)
-    app.router.add_get("/who", who_endpoint)
-    app.router.add_post("/who-stream", who_stream_endpoint)
+    # Agent Finder API
+    app.router.add_post("/search", search_endpoint)
+    app.router.add_post("/explore", explore_endpoint)
+    app.router.add_get("/agents", agents_endpoint)
 
-    # MCP endpoints
-    app.router.add_post("/mcp", mcp_endpoint)
+    # Well-known discovery
+    app.router.add_get("/.well-known/ai-catalog.json", ai_catalog_manifest)
+    app.router.add_get("/.well-known/agent-card.json", agent_card)
 
-    # Admin endpoints
+    # Protocol wrappers
+    if MCP_ENABLED:
+        app.router.add_post("/mcp", mcp_endpoint)
+    if A2A_ENABLED:
+        app.router.add_post("/a2a", a2a_endpoint)
+
+    # Admin
     app.router.add_get("/health", health_check)
     app.router.add_get("/stats", stats_endpoint)
     app.router.add_post("/clear-cache", clear_cache_endpoint)
 
-    # Lifecycle hooks
     app.on_startup.append(startup)
     app.on_cleanup.append(cleanup)
-
     return app
 
 
-# ========== MAIN ==========
-
 if __name__ == "__main__":
-    # Print configuration
     print("=" * 60)
-    print("WHO Standalone Server")
+    print(f"Agent Finder Server (spec v{SPEC_VERSION})")
     print("=" * 60)
-    print(f"Web UI: http://{HOST}:{PORT}/")
-    print(f"REST endpoint: POST http://{HOST}:{PORT}/who")
-    print(f"MCP endpoint: POST http://{HOST}:{PORT}/mcp")
-    print(f"Health check: GET http://{HOST}:{PORT}/health")
-    print(f"Statistics: GET http://{HOST}:{PORT}/stats")
+    print(f"Web UI:        http://{HOST}:{PORT}/")
+    print(f"Search:        POST http://{HOST}:{PORT}/search")
+    print(f"Explore:       POST http://{HOST}:{PORT}/explore")
+    print(f"List:          GET  http://{HOST}:{PORT}/agents")
+    print(f"MCP wrapper:   {'POST http://%s:%s/mcp' % (HOST, PORT) if MCP_ENABLED else 'disabled'}")
+    print(f"A2A wrapper:   {'POST http://%s:%s/a2a' % (HOST, PORT) if A2A_ENABLED else 'disabled'}")
+    print(f"Health:        GET  http://{HOST}:{PORT}/health")
     print("=" * 60)
 
-    # Create and run application
     app = create_app()
-
-    # Run the server - let aiohttp handle signals properly
     try:
-        web.run_app(
-            app,
-            host=HOST,
-            port=PORT,
-            access_log=None,  # Disable access logs for performance
-            print=None  # Suppress aiohttp startup message (we have our own)
-        )
+        web.run_app(app, host=HOST, port=PORT, access_log=None, print=None)
     except KeyboardInterrupt:
         print("\nServer stopped by user")
     except Exception:

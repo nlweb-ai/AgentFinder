@@ -1,0 +1,10 @@
+{"id": "ce1", "prompt": "Help me set up an A/B test for our new checkout flow, with a clear hypothesis, success metrics, and execution-readiness gates before we launch.", "gold": "ab-test-setup", "gold_type": "application/ai-skill"}
+{"id": "ce2", "prompt": "Go through the review comments on my open GitHub pull request and address each one using the gh CLI.", "gold": "address-github-comments", "gold_type": "application/ai-skill"}
+{"id": "ce3", "prompt": "Audit our website for WCAG accessibility compliance and tell me what fails for assistive technology.", "gold": "accessibility-compliance-accessibility-audit", "gold_type": "application/ai-skill"}
+{"id": "ce4", "prompt": "Fetch this X/Twitter post as clean LLM-friendly structured JSON: https://x.com/some/status/123.", "gold": "adhx", "gold_type": "application/ai-skill"}
+{"id": "ce5", "prompt": "Implement an LLM-as-judge to compare two model outputs and score them against an evaluation rubric.", "gold": "advanced-evaluation", "gold_type": "application/ai-skill"}
+{"id": "ce6", "prompt": "Find startups whose engineering is accelerating right now based on public GitHub activity, with per-company velocity signals.", "gold": "GitDealFlow Signal Agent", "gold_type": "application/a2a-agent-card+json"}
+{"id": "ce7", "prompt": "Search real-time Korean and global tech news about semiconductor export policy.", "gold": "Korean News Agent", "gold_type": "application/a2a-agent-card+json"}
+{"id": "ce8", "prompt": "Look up this IT hardware part number, normalize it, and get cross-references and pricing intelligence.", "gold": "PartsTable Intelligence", "gold_type": "application/a2a-agent-card+json"}
+{"id": "ce9", "prompt": "Get the current PM2.5 air quality and weather forecast from Korean government open data for Seoul.", "gold": "Korean Public Data Agent", "gold_type": "application/a2a-agent-card+json"}
+{"id": "ce10", "prompt": "Set up a peer-to-peer, end-to-end encrypted file transfer with no account and no size limit.", "gold": "Perkoon File Transfer", "gold_type": "application/a2a-agent-card+json"}

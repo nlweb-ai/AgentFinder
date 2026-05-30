@@ -1,0 +1,16 @@
+{"id": "tr1", "prompt": "I'm planning a trip and need to know if it will rain in Lisbon this weekend.", "gold": "weather_forecast_api"}
+{"id": "tr2", "prompt": "Convert 500 US dollars into Japanese yen at today's rate.", "gold": "currency_exchange_api"}
+{"id": "tr3", "prompt": "What is the latest share price for the ticker MSFT?", "gold": "stock_quote_api"}
+{"id": "tr4", "prompt": "Find me a flight from New York to London next Tuesday.", "gold": "flight_search_api"}
+{"id": "tr5", "prompt": "Turn this Spanish paragraph into English.", "gold": "language_translation_api"}
+{"id": "tr6", "prompt": "Pull all rows from the orders table where status is 'shipped'.", "gold": "sql_database_api"}
+{"id": "tr7", "prompt": "Open a pull request on our GitHub repo with this patch.", "gold": "github_repo_api"}
+{"id": "tr8", "prompt": "Get me driving directions from the airport to the hotel downtown.", "gold": "maps_directions_api"}
+{"id": "tr9", "prompt": "Transcribe this recorded interview into text.", "gold": "speech_to_text_api"}
+{"id": "tr10", "prompt": "Make a picture of a red bicycle on a beach at sunset.", "gold": "image_generation_api"}
+{"id": "tr11", "prompt": "What are the latitude and longitude of the Eiffel Tower?", "gold": "geocoding_api"}
+{"id": "tr12", "prompt": "Search the web for recent reviews of the Sony WH-1000XM5 headphones.", "gold": "web_search_api"}
+{"id": "tr13", "prompt": "Send an email to the team letting them know the deploy finished successfully.", "gold": "send_email_api"}
+{"id": "tr14", "prompt": "Put a 30-minute sync with Priya on my calendar for tomorrow at 10am.", "gold": "calendar_events_api"}
+{"id": "tr15", "prompt": "Pull the tables out of this quarterly report PDF and give me the numbers.", "gold": "pdf_extract_api"}
+{"id": "tr16", "prompt": "Count how many users signed up last month from the users table.", "gold": "sql_database_api"}

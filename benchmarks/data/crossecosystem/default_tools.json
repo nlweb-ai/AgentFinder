@@ -1,0 +1,8 @@
+[
+  {"name": "github_mcp", "description": "GitHub MCP server: read repos, open and review pull requests, file and comment on issues."},
+  {"name": "slack_mcp", "description": "Slack MCP server: read channels, post messages, search conversation history."},
+  {"name": "postgres_mcp", "description": "Postgres MCP server: run SQL queries against the application database."},
+  {"name": "filesystem_mcp", "description": "Filesystem MCP server: read, write, and search files in the local workspace."},
+  {"name": "sentry_mcp", "description": "Sentry MCP server: list and inspect application errors, stack traces, and issue details."},
+  {"name": "web_fetch_mcp", "description": "Web fetch MCP server: retrieve the contents of a URL and return readable text."}
+]

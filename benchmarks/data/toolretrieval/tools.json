@@ -1,0 +1,17 @@
+[
+  {"name": "weather_forecast_api", "description": "Get current conditions and multi-day weather forecasts for any city or coordinates."},
+  {"name": "stock_quote_api", "description": "Look up real-time and historical stock prices, market cap, and trading volume by ticker symbol."},
+  {"name": "currency_exchange_api", "description": "Convert amounts between world currencies using live foreign-exchange rates."},
+  {"name": "geocoding_api", "description": "Convert a street address or place name into latitude/longitude coordinates and vice versa."},
+  {"name": "flight_search_api", "description": "Search available airline flights between airports by date, with prices and durations."},
+  {"name": "language_translation_api", "description": "Translate text between dozens of human languages."},
+  {"name": "image_generation_api", "description": "Generate images from a text prompt using a diffusion model."},
+  {"name": "calendar_events_api", "description": "Create, list, and update calendar events and meeting invitations."},
+  {"name": "sql_database_api", "description": "Run read-only SQL queries against a relational database and return rows."},
+  {"name": "github_repo_api", "description": "Open pull requests, file issues, and read repository contents on GitHub."},
+  {"name": "send_email_api", "description": "Compose and send email messages with attachments to recipients."},
+  {"name": "web_search_api", "description": "Search the public web and return ranked result titles, snippets, and URLs."},
+  {"name": "pdf_extract_api", "description": "Extract text, tables, and metadata from PDF documents."},
+  {"name": "speech_to_text_api", "description": "Transcribe spoken audio recordings into written text."},
+  {"name": "maps_directions_api", "description": "Get turn-by-turn driving, walking, or transit directions between two locations."}
+]

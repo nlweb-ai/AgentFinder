@@ -4,7 +4,6 @@ Implement LLMBackend class for your provider (Azure OpenAI, OpenAI, Anthropic, e
 """
 import os
 import json
-import asyncio
 import itertools
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
@@ -19,6 +18,55 @@ LLM_CONFIG = {
     "max_concurrent": int(os.getenv("LLM_MAX_CONCURRENT", "1000")),
     "api_version": os.getenv("LLM_API_VERSION", "2024-02-01"),
 }
+
+
+def _rank_prompt(query: str, augment_description: str) -> str:
+    """Query-time relevance scoring: how well does this augment answer the query."""
+    return f"""Assign a score between 0 and 100 to the following agent based on the likelihood that the agent will contain an answer to the user's question.
+
+First think about the kind of thing the user is seeking and then verify that the agent is primarily focused on that kind of thing.
+
+The user's question is: {query}
+
+The agent's description is:
+{augment_description}
+
+Return JSON only with this exact format: {{"score": <integer 0-100>, "description": "<one sentence explanation>"}}"""
+
+
+def _quality_prompt(text: str) -> str:
+    """Curation scoring: judge an augment on its intrinsic quality, not a query."""
+    return f"""You are curating a catalog of capabilities (MCP servers, agents, skills) for an AI agent to discover and use. Rate the following entry from 0 to 100 on its overall quality and usefulness.
+
+Score HIGH when the entry: has a clear, specific description of concrete capabilities; exposes broadly useful functionality; and appears to be a real, legitimate, maintained capability.
+
+Score LOW when the entry: has a vague, empty, or generic description; appears to be a test, demo, example, placeholder, or template; looks like spam or a near-duplicate; or describes something with little practical utility.
+
+Judge the entry on its own merits — do NOT reward marketing buzzwords ("powerful", "best", "amazing") that are not backed by specific capabilities.
+
+The entry is:
+{text}
+
+Return JSON only with this exact format: {{"score": <integer 0-100>, "description": "<one sentence justification>"}}"""
+
+
+def _chat_kwargs(model: str, max_tokens: int, temperature: float) -> dict:
+    """Build chat-completion kwargs compatible with the target model.
+
+    Newer reasoning models (gpt-5*, o1/o3/o4*) reject `max_tokens` (require
+    `max_completion_tokens`) and only accept the default temperature. Detect
+    those by name and adjust, so callers can pass the same args for any model.
+    """
+    m = (model or "").lower()
+    reasoning = m.startswith(("gpt-5", "o1", "o3", "o4"))
+    kwargs: dict = {}
+    if reasoning:
+        kwargs["max_completion_tokens"] = max_tokens
+        # temperature other than the default is unsupported; omit it.
+    else:
+        kwargs["max_tokens"] = max_tokens
+        kwargs["temperature"] = temperature
+    return kwargs
 
 
 class LLMBackend(ABC):
@@ -42,6 +90,14 @@ class LLMBackend(ABC):
             query: User's natural language query
             augment_description: Agent description to rank
             model: Optional model override (if None, uses configured model)
+        Returns: {"score": int, "description": str}
+        """
+        pass
+
+    @abstractmethod
+    async def score_quality(self, text: str, model: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Score an entry's intrinsic quality/usefulness for catalog curation (no query).
         Returns: {"score": int, "description": str}
         """
         pass
@@ -108,25 +164,12 @@ class AzureOpenAIBackend(LLMBackend):
             # Return zero vector on error (will rank low)
             return [0.0] * 1536  # Default embedding size
 
-    async def rank_augment(self, query: str, augment_description: str, model: Optional[str] = None) -> Dict[str, Any]:
-        """Rank an agent using Azure OpenAI"""
+    async def _score(self, prompt: str, model: Optional[str] = None) -> Dict[str, Any]:
+        """Run a scoring prompt and parse the {score, description} JSON result."""
         from openai import APITimeoutError, APIError
 
         client = next(self.client_cycle)
-
-        # Use provided model or fall back to configured model
         model_to_use = model if model else LLM_CONFIG["model"]
-
-        prompt = f"""Assign a score between 0 and 100 to the following agent based on the likelihood that the agent will contain an answer to the user's question.
-
-First think about the kind of thing the user is seeking and then verify that the agent is primarily focused on that kind of thing.
-
-The user's question is: {query}
-
-The agent's description is:
-{augment_description}
-
-Return JSON only with this exact format: {{"score": <integer 0-100>, "description": "<one sentence explanation>"}}"""
 
         try:
             response = await client.chat.completions.create(
@@ -139,23 +182,49 @@ Return JSON only with this exact format: {{"score": <integer 0-100>, "descriptio
 
             result = json.loads(response.choices[0].message.content)
 
-            # Ensure required fields
             if "score" not in result:
                 result["score"] = 0
             if "description" not in result:
                 result["description"] = "No description provided"
-
-            # Ensure score is an integer between 0 and 100
             result["score"] = max(0, min(100, int(result["score"])))
-
             return result
 
         except APITimeoutError as e:
-            print(f"Ranking timeout (8s exceeded): {str(e)[:100]}")
-            return {"score": 0, "description": "Ranking timed out"}
+            print(f"Scoring timeout (8s exceeded): {str(e)[:100]}")
+            return {"score": 0, "description": "Scoring timed out"}
         except (APIError, Exception) as e:
-            print(f"Ranking error: {str(e)[:100]}")
-            return {"score": 0, "description": "Ranking failed"}
+            print(f"Scoring error: {str(e)[:100]}")
+            return {"score": 0, "description": "Scoring failed"}
+
+    async def rank_augment(self, query: str, augment_description: str, model: Optional[str] = None) -> Dict[str, Any]:
+        """Rank an agent for a query using Azure OpenAI"""
+        return await self._score(_rank_prompt(query, augment_description), model)
+
+    async def score_quality(self, text: str, model: Optional[str] = None) -> Dict[str, Any]:
+        """Score an entry's intrinsic quality for curation using Azure OpenAI"""
+        return await self._score(_quality_prompt(text), model)
+
+    async def generate(self, messages: List[Dict[str, str]], model: Optional[str] = None,
+                        max_tokens: int = 1024, temperature: float = 0.0):
+        """Free-form chat completion (no forced JSON).
+
+        Returns (text, usage) where usage is
+        {"prompt_tokens", "completion_tokens", "total_tokens"}.
+        """
+        client = next(self.client_cycle)
+        resolved = model or LLM_CONFIG["model"]
+        response = await client.chat.completions.create(
+            model=resolved,
+            messages=messages,
+            **_chat_kwargs(resolved, max_tokens, temperature),
+        )
+        u = response.usage
+        usage = {
+            "prompt_tokens": u.prompt_tokens if u else 0,
+            "completion_tokens": u.completion_tokens if u else 0,
+            "total_tokens": u.total_tokens if u else 0,
+        }
+        return response.choices[0].message.content or "", usage
 
     async def close(self):
         """Cleanup - OpenAI clients don't need explicit cleanup"""
@@ -200,23 +269,10 @@ class OpenAIBackend(LLMBackend):
             print(f"Embedding error: {e}")
             return [0.0] * 1536
 
-    async def rank_augment(self, query: str, augment_description: str, model: Optional[str] = None) -> Dict[str, Any]:
-        """Rank an agent using OpenAI"""
+    async def _score(self, prompt: str, model: Optional[str] = None) -> Dict[str, Any]:
+        """Run a scoring prompt and parse the {score, description} JSON result."""
         client = next(self.client_cycle)
-
-        # Use provided model or fall back to configured model
         model_to_use = model if model else LLM_CONFIG["model"]
-
-        prompt = f"""Assign a score between 0 and 100 to the following agent based on the likelihood that the agent will contain an answer to the user's question.
-
-First think about the kind of thing the user is seeking and then verify that the agent is primarily focused on that kind of thing.
-
-The user's question is: {query}
-
-The agent's description is:
-{augment_description}
-
-Return JSON only with this exact format: {{"score": <integer 0-100>, "description": "<one sentence explanation>"}}"""
 
         try:
             response = await client.chat.completions.create(
@@ -231,11 +287,40 @@ Return JSON only with this exact format: {{"score": <integer 0-100>, "descriptio
             result["score"] = max(0, min(100, int(result.get("score", 0))))
             if "description" not in result:
                 result["description"] = "No description"
-
             return result
         except Exception as e:
-            print(f"Ranking error: {str(e)[:100]}")
-            return {"score": 0, "description": "Ranking failed"}
+            print(f"Scoring error: {str(e)[:100]}")
+            return {"score": 0, "description": "Scoring failed"}
+
+    async def rank_augment(self, query: str, augment_description: str, model: Optional[str] = None) -> Dict[str, Any]:
+        """Rank an agent for a query using OpenAI"""
+        return await self._score(_rank_prompt(query, augment_description), model)
+
+    async def score_quality(self, text: str, model: Optional[str] = None) -> Dict[str, Any]:
+        """Score an entry's intrinsic quality for curation using OpenAI"""
+        return await self._score(_quality_prompt(text), model)
+
+    async def generate(self, messages: List[Dict[str, str]], model: Optional[str] = None,
+                        max_tokens: int = 1024, temperature: float = 0.0):
+        """Free-form chat completion (no forced JSON).
+
+        Returns (text, usage) where usage is
+        {"prompt_tokens", "completion_tokens", "total_tokens"}.
+        """
+        client = next(self.client_cycle)
+        resolved = model or LLM_CONFIG["model"]
+        response = await client.chat.completions.create(
+            model=resolved,
+            messages=messages,
+            **_chat_kwargs(resolved, max_tokens, temperature),
+        )
+        u = response.usage
+        usage = {
+            "prompt_tokens": u.prompt_tokens if u else 0,
+            "completion_tokens": u.completion_tokens if u else 0,
+            "total_tokens": u.total_tokens if u else 0,
+        }
+        return response.choices[0].message.content or "", usage
 
     async def close(self):
         """Cleanup"""
@@ -261,6 +346,10 @@ class AnthropicBackend(LLMBackend):
 
     async def rank_augment(self, query: str, augment_description: str, model: Optional[str] = None) -> Dict[str, Any]:
         """Rank using Claude"""
+        raise NotImplementedError("Anthropic backend not yet implemented")
+
+    async def score_quality(self, text: str, model: Optional[str] = None) -> Dict[str, Any]:
+        """Score quality using Claude"""
         raise NotImplementedError("Anthropic backend not yet implemented")
 
     async def close(self):

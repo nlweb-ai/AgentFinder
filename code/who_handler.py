@@ -1,54 +1,110 @@
 """
-Core WHO handler logic - orchestration, caching, and ranking.
-Backend-agnostic implementation following the /who protocol specification.
+Core Agent Finder handler - orchestration, caching, ranking, and federation.
+Backend-agnostic implementation following the Agent Finder specification v0.5.
 
-Protocol version: 0.1
-See: who_protocol.md for full specification
+Implements the catalog-entry data model (§4) and the search/explore/list APIs (§7),
+plus registry-to-registry federation (§8).
 """
 import os
 import asyncio
+import base64
 import hashlib
 import time
 import json
+import re
 from typing import List, Dict, Any, Optional, Tuple
 from collections import OrderedDict
+from urllib.parse import urlparse
 
 from search_backend import get_search_backend
 from llm_backend import get_llm_backend
 
-# Protocol version
-WHO_PROTOCOL_VERSION = "0.1"
+# Specification version
+SPEC_VERSION = "0.5"
 
 # Debug logging control
 DEBUG_ENABLED = os.getenv("WHO_DEBUG", "false").lower() in ["true", "1", "yes"]
 
+
 def debug_log(message: str, **kwargs):
     """Print debug message if DEBUG_ENABLED is True"""
     if DEBUG_ENABLED:
-        prefix = "[WHO_DEBUG]"
+        prefix = "[AF_DEBUG]"
         if kwargs:
-            print(f"{prefix} {message} | {json.dumps(kwargs, indent=2)}")
+            print(f"{prefix} {message} | {json.dumps(kwargs, default=str)}")
         else:
             print(f"{prefix} {message}")
+
+
+def _load_upstreams() -> List[Dict[str, str]]:
+    """Parse upstream registry config from AGENT_FINDER_REGISTRIES (JSON array).
+
+    Each element: {"identifier", "displayName", "type", "url"} where url is the
+    upstream POST /search endpoint.
+    """
+    raw = os.getenv("AGENT_FINDER_REGISTRIES", "").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [r for r in data if isinstance(r, dict) and r.get("url")]
+    except json.JSONDecodeError:
+        print("Warning: AGENT_FINDER_REGISTRIES is not valid JSON; federation disabled")
+    return []
+
 
 # Settings from environment variables
 SETTINGS = {
     "score_threshold": int(os.getenv("WHO_SCORE_THRESHOLD", "64")),
-    "early_threshold": int(os.getenv("WHO_EARLY_THRESHOLD", "85")),  # Return early if enough high scores
     "max_results": int(os.getenv("WHO_MAX_RESULTS", "10")),
     "search_top_k": int(os.getenv("WHO_SEARCH_TOP_K", "30")),
+    "list_top_k": int(os.getenv("AGENT_FINDER_LIST_TOP_K", "200")),
     "cache_ttl": int(os.getenv("WHO_CACHE_TTL", "3600")),
     "max_cache_entries": int(os.getenv("WHO_MAX_CACHE_ENTRIES", "10000")),
     "ranking_cache_entries": int(os.getenv("WHO_RANKING_CACHE_ENTRIES", "100000")),
+    "default_strategy": os.getenv("AGENT_FINDER_STRATEGY", "agent"),
+    "default_media_type": os.getenv("AGENT_FINDER_DEFAULT_TYPE", "application/a2a-agent-card+json"),
+    "source": os.getenv("AGENT_FINDER_SOURCE", ""),
+    "federation_timeout": float(os.getenv("AGENT_FINDER_FEDERATION_TIMEOUT", "8")),
 }
 
-# Error codes per /who protocol
+UPSTREAMS = _load_upstreams()
+
+# Standard error codes (Appendix B)
 ERROR_CODES = {
-    "INVALID_QUERY": "Malformed or missing query",
-    "NO_RESULTS": "No matching augments found",
-    "RATE_LIMITED": "Too many requests",
-    "INTERNAL_ERROR": "Service error",
+    "INVALID_ARGUMENT": (400, "Malformed query or invalid filter syntax"),
+    "UNAUTHENTICATED": (401, "Invalid or missing credentials"),
+    "NOT_FOUND": (404, "Non-existent agent or registry"),
+    "RATE_LIMIT_EXCEEDED": (429, "Too many requests"),
+    "INTERNAL_ERROR": (500, "Internal server failure"),
+    "NOT_IMPLEMENTED": (501, "Endpoint not implemented by this registry"),
 }
+
+# Schema @type -> IANA-style media type (§3.3)
+MEDIA_TYPE_MAP = {
+    "A2AAgent": "application/a2a-agent-card+json",
+    "Agent": "application/a2a-agent-card+json",
+    "MCPServer": "application/mcp-server+json",
+    "MCPTool": "application/mcp-server+json",
+    "Server": "application/mcp-server+json",
+    "Tool": "application/mcp-server+json",
+    "Skill": "application/ai-skill",
+    "AgentSkill": "application/ai-skill",
+    "OpenAPIService": "application/openapi+json",
+    "API": "application/openapi+json",
+}
+
+
+class AgentFinderError(Exception):
+    """Raised to produce a standard error response with a known code."""
+
+    def __init__(self, code: str, message: Optional[str] = None):
+        self.code = code
+        self.http_status, default_msg = ERROR_CODES.get(code, (500, "Unknown error"))
+        self.message = message or default_msg
+        super().__init__(self.message)
+
 
 class TTLCache:
     """Simple TTL cache with LRU eviction"""
@@ -59,313 +115,266 @@ class TTLCache:
         self.ttl = ttl
 
     def get(self, key: Any) -> Optional[Any]:
-        """Get value from cache if not expired"""
         if key in self.cache:
             value, timestamp = self.cache[key]
             if time.time() - timestamp < self.ttl:
-                # Move to end for LRU
                 self.cache.move_to_end(key)
                 return value
-            else:
-                # Expired - remove it
-                del self.cache[key]
+            del self.cache[key]
         return None
 
     def set(self, key: Any, value: Any):
-        """Set value in cache with current timestamp"""
-        # Evict oldest if at capacity
         if len(self.cache) >= self.max_size:
             self.cache.popitem(last=False)
-
         self.cache[key] = (value, time.time())
 
     def clear(self):
-        """Clear all cache entries"""
         self.cache.clear()
 
     def size(self) -> int:
-        """Get current cache size"""
         return len(self.cache)
 
-class WHOHandler:
-    """Main WHO query handler with caching and parallel processing"""
+
+# ========== Catalog entry helpers (§4) ==========
+
+def _slugify(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
+    return slug or "agent"
+
+
+def _publisher_from_url(url: str) -> str:
+    try:
+        host = urlparse(url).netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def publisher_from_identifier(identifier: str) -> Optional[str]:
+    """Extract the <publisher> segment from a urn:ai:<publisher>:... identifier (§4.2.1)."""
+    if not identifier:
+        return None
+    parts = identifier.split(":")
+    if len(parts) >= 3 and parts[0] == "urn" and parts[1] == "ai":
+        return parts[2]
+    return None
+
+
+def _media_type_for(schema_type: str) -> str:
+    return MEDIA_TYPE_MAP.get(schema_type, SETTINGS["default_media_type"])
+
+
+def _build_identifier(doc: Dict[str, Any], json_ld: Dict[str, Any], schema_type: str) -> str:
+    """Use an existing urn:ai identifier if present, else synthesize one (§4.2.1)."""
+    existing = json_ld.get("identifier") or json_ld.get("@id") or doc.get("identifier")
+    if isinstance(existing, str) and existing.startswith("urn:ai:"):
+        return existing
+
+    url = doc.get("augment_url") or doc.get("url") or ""
+    publisher = _publisher_from_url(url)
+    namespace = {
+        "application/mcp-server+json": "server",
+        "application/ai-skill": "skill",
+    }.get(_media_type_for(schema_type), "agent")
+    slug = _slugify(doc.get("augment_name") or doc.get("name") or "")
+    return f"urn:ai:{publisher}:{namespace}:{slug}"
+
+
+def _extract_schema_type(json_ld: Dict[str, Any]) -> str:
+    if isinstance(json_ld, dict):
+        return json_ld.get("@type", "Agent")
+    if isinstance(json_ld, list) and json_ld and isinstance(json_ld[0], dict):
+        return json_ld[0].get("@type", "Agent")
+    return "Agent"
+
+
+def _to_catalog_entry(doc: Dict[str, Any], ranking: Optional[Dict[str, Any]], source: str) -> Dict[str, Any]:
+    """Convert an internal ranked document into a spec catalog entry (§4.2)."""
+    raw_json_ld = doc.get("augment_json_ld") or doc.get("json_ld") or "{}"
+    try:
+        json_ld = json.loads(raw_json_ld) if isinstance(raw_json_ld, str) else raw_json_ld
+    except (json.JSONDecodeError, TypeError):
+        json_ld = {}
+    if not isinstance(json_ld, dict):
+        json_ld = {}
+
+    schema_type = _extract_schema_type(json_ld)
+    url = doc.get("augment_url") or doc.get("url") or ""
+    display_name = doc.get("augment_name") or doc.get("name") or "Unknown"
+    description = (ranking or {}).get("description") or doc.get("augment_description") or doc.get("description") or ""
+
+    # Manifest entries already carry an IANA media type in `type`; prefer it.
+    explicit_type = json_ld.get("type")
+    media_type = explicit_type if isinstance(explicit_type, str) and "/" in explicit_type else _media_type_for(schema_type)
+
+    entry: Dict[str, Any] = {
+        "identifier": _build_identifier(doc, json_ld, schema_type),
+        "displayName": display_name,
+        "type": media_type,
+    }
+    if url:
+        entry["url"] = url
+    if description:
+        entry["description"] = description
+
+    # Optional discovery metadata, carried through when present.
+    if json_ld.get("tags"):
+        entry["tags"] = json_ld["tags"]
+    if json_ld.get("capabilities"):
+        entry["capabilities"] = json_ld["capabilities"]
+
+    rep_queries = [mq.get("query") for mq in doc.get("matched_queries", []) if mq.get("query")]
+    if rep_queries:
+        entry["representativeQueries"] = rep_queries[:5]
+    elif json_ld.get("representativeQueries"):
+        entry["representativeQueries"] = json_ld["representativeQueries"]
+
+    for fld in ("version", "updatedAt", "metadata", "trustManifest"):
+        if json_ld.get(fld):
+            entry[fld] = json_ld[fld]
+
+    if ranking is not None:
+        entry["score"] = ranking.get("score", 0)
+    if source:
+        entry["source"] = source
+    return entry
+
+
+# ========== Filter matching (§7.1) ==========
+
+def _values_at_path(entry: Dict[str, Any], path: str) -> List[Any]:
+    """Resolve a dot-separated path into a flat list of scalar values.
+
+    'publisher' is special-cased: derived from the entry's URN identifier (§7.1).
+    """
+    if path == "publisher":
+        pub = publisher_from_identifier(entry.get("identifier", ""))
+        return [pub] if pub else []
+
+    current: List[Any] = [entry]
+    for segment in path.split("."):
+        nxt: List[Any] = []
+        for node in current:
+            if isinstance(node, dict) and segment in node:
+                nxt.append(node[segment])
+            elif isinstance(node, list):
+                for item in node:
+                    if isinstance(item, dict) and segment in item:
+                        nxt.append(item[segment])
+        current = nxt
+
+    leaves: List[Any] = []
+    for node in current:
+        if isinstance(node, list):
+            leaves.extend(node)
+        else:
+            leaves.append(node)
+    return leaves
+
+
+def _matches_filter(entry: Dict[str, Any], filt: Optional[Dict[str, Any]]) -> bool:
+    """An entry matches if every key's constraint is satisfied (AND across keys,
+    OR within a key)."""
+    if not filt:
+        return True
+    for key, wanted in filt.items():
+        if not isinstance(wanted, list):
+            wanted = [wanted]
+        wanted_set = {str(w) for w in wanted}
+        have = {str(v) for v in _values_at_path(entry, key)}
+        if not (have & wanted_set):
+            return False
+    return True
+
+
+def _encode_page_token(offset: int) -> str:
+    return base64.urlsafe_b64encode(json.dumps({"offset": offset}).encode()).decode()
+
+
+def _decode_page_token(token: Optional[str]) -> int:
+    if not token:
+        return 0
+    try:
+        return int(json.loads(base64.urlsafe_b64decode(token.encode()).decode()).get("offset", 0))
+    except Exception:
+        raise AgentFinderError("INVALID_ARGUMENT", "Malformed pageToken")
+
+
+class AgentFinderHandler:
+    """Main handler: search, explore, list, and federation."""
 
     def __init__(self):
         self.search_backend = None
         self.llm_backend = None
+        self.http_session = None
 
-        # Caches with different TTLs and sizes
-        self.embedding_cache = {}  # Never expires - embeddings are stable
-        self.search_cache = TTLCache(
-            max_size=SETTINGS["max_cache_entries"],
-            ttl=SETTINGS["cache_ttl"]
-        )
-        self.ranking_cache = TTLCache(
-            max_size=SETTINGS["ranking_cache_entries"],
-            ttl=SETTINGS["cache_ttl"] * 2  # Rankings cached longer
-        )
+        self.embedding_cache = {}
+        self.search_cache = TTLCache(SETTINGS["max_cache_entries"], SETTINGS["cache_ttl"])
+        self.ranking_cache = TTLCache(SETTINGS["ranking_cache_entries"], SETTINGS["cache_ttl"] * 2)
 
-        # Statistics
         self.stats = {
             "queries_processed": 0,
             "cache_hits": 0,
             "cache_misses": 0,
-            "total_sites_ranked": 0,
+            "total_ranked": 0,
         }
 
     async def initialize(self):
-        """Initialize backends"""
-        # Get and initialize backends
         self.search_backend = get_search_backend()
         self.llm_backend = get_llm_backend()
+        # The LLM backend doubles as the embedder; init it first so the in-memory
+        # search backend can build its vectors at load time.
+        await self.llm_backend.initialize()
+        await self.search_backend.initialize(embedder=self.llm_backend)
 
-        await asyncio.gather(
-            self.search_backend.initialize(),
-            self.llm_backend.initialize()
-        )
+    # ----- retrieval + ranking -----
 
-    async def process_query(
-        self,
-        query: str,
-        augment_type: Optional[str] = None,
-        domain: Optional[str] = None,
-        capabilities: Optional[List[str]] = None,
-        max_results: Optional[int] = None,
-        retrieval_strategy: str = "agent"
-    ) -> Dict[str, Any]:
-        """
-        Process a WHO query and return ranked results per /who protocol (Section 3).
+    async def _embed(self, query: str) -> List[float]:
+        if query not in self.embedding_cache:
+            self.embedding_cache[query] = await self.llm_backend.get_embedding(query)
+        return self.embedding_cache[query]
 
-        Args:
-            query: Natural language description of the need
-            augment_type: Filter by augment type (e.g., "A2AAgent", "MCPTool", "Skill")
-            domain: Filter by domain (e.g., "recipes", "travel", "finance")
-            capabilities: Array of required capabilities
-            max_results: Maximum number of results to return
-            retrieval_strategy: "agent" (Strategy 1) or "query" (Strategy 2)
+    async def _retrieve(self, query: str, strategy: str, top_k: int) -> Tuple[List[Dict[str, Any]], str]:
+        """Retrieve and normalize candidate documents. Returns (docs, cache_key)."""
+        vector = await self._embed(query)
+        cache_key = hashlib.md5(f"{query}|{strategy}".encode()).hexdigest()
 
-        Returns:
-            Dict with _meta and results per /who protocol specification (Section 6)
-        """
-        debug_log("=== PROCESS_QUERY START ===", query=query, strategy=retrieval_strategy,
-                  augment_type=augment_type, max_results=max_results)
+        docs = self.search_cache.get(cache_key)
+        if docs is not None:
+            self.stats["cache_hits"] += 1
+            return docs, cache_key
 
-        self.stats["queries_processed"] += 1
-        start_time = time.time()
-
-        # Use provided max_results or default from settings
-        result_limit = max_results if max_results is not None else SETTINGS["max_results"]
-        debug_log("Result limit set", result_limit=result_limit)
-
-        # Route to appropriate strategy
-        if retrieval_strategy == "query":
-            debug_log("Routing to QUERY strategy")
-            result = await self._process_query_strategy(query, augment_type, domain, capabilities, result_limit)
+        self.stats["cache_misses"] += 1
+        if strategy == "query":
+            raw = await self.search_backend.search(query, vector, top_k * 2, strategy="query")
+            docs = self._aggregate_by_augment(raw)
         else:
-            debug_log("Routing to AUGMENT strategy")
-            result = await self._process_augment_strategy(query, augment_type, domain, capabilities, result_limit)
+            raw = await self.search_backend.search(query, vector, top_k, strategy="augment")
+            docs = self._normalize_augments(raw)
+        self.search_cache.set(cache_key, docs)
+        return docs, cache_key
 
-        elapsed = time.time() - start_time
-        result_count = len(result.get("results", [])) if isinstance(result, dict) else 0
-        debug_log("=== PROCESS_QUERY END ===", elapsed_seconds=elapsed, result_count=result_count)
-
-        return result
-
-    async def process_query_stream(
-        self,
-        query: str,
-        augment_type: Optional[str] = None,
-        domain: Optional[str] = None,
-        capabilities: Optional[List[str]] = None,
-        max_results: Optional[int] = None,
-        retrieval_strategy: str = "query",
-        stream_callback: Optional[callable] = None
-    ):
-        """
-        Streaming version of process_query. Calls stream_callback for each result as it completes.
-
-        Only supports query strategy (Strategy 2) for streaming.
-        """
-        self.stats["queries_processed"] += 1
-        result_limit = max_results if max_results is not None else SETTINGS["max_results"]
-
-        # Only query strategy supports streaming
-        if retrieval_strategy == "query":
-            # Call _process_query_strategy with stream_callback
-            await self._process_query_strategy(query, augment_type, domain, capabilities, result_limit, stream_callback)
-        else:
-            # Fall back to non-streaming for augment strategy
-            result = await self._process_augment_strategy(query, augment_type, domain, capabilities, result_limit)
-            # Stream the final results
-            if stream_callback and "results" in result:
-                for r in result["results"]:
-                    await stream_callback(r)
-
-    async def _process_augment_strategy(
-        self,
-        query: str,
-        augment_type: Optional[str],
-        domain: Optional[str],
-        capabilities: Optional[List[str]],
-        result_limit: int,
-        stream_callback: Optional[callable] = None
-    ) -> Dict[str, Any]:
-        """
-        Strategy 1: Augment-Level Retrieval
-        Retrieve augment documents directly.
-        """
-        try:
-            debug_log(">>> AUGMENT STRATEGY: Step 1 - Get embedding")
-            # 1. Get embedding (with cache)
-            if query not in self.embedding_cache:
-                debug_log("Embedding cache MISS - generating new embedding")
-                self.embedding_cache[query] = await self.llm_backend.get_embedding(query)
-                debug_log("Embedding generated", vector_length=len(self.embedding_cache[query]))
-            else:
-                debug_log("Embedding cache HIT")
-
-            vector = self.embedding_cache[query]
-
-            # 2. Search for relevant augment documents
-            debug_log(">>> AUGMENT STRATEGY: Step 2 - Search for augments", search_top_k=SETTINGS["search_top_k"])
-            cache_key = hashlib.md5(query.encode()).hexdigest()
-            search_results = self.search_cache.get(cache_key)
-
-            if search_results is None:
-                debug_log("Search cache MISS - calling search backend")
-                self.stats["cache_misses"] += 1
-                raw_augments = await self.search_backend.search(
-                    query, vector, SETTINGS["search_top_k"], strategy="augment"
-                )
-                debug_log("Search backend returned results", count=len(raw_augments) if raw_augments else 0)
-                if raw_augments:
-                    debug_log("Sample raw augment", sample=raw_augments[0] if raw_augments else None)
-
-                # Normalize augment documents to standard format
-                search_results = self._normalize_augment_documents(raw_augments)
-                debug_log("Normalized augments", count=len(search_results))
-                if search_results:
-                    debug_log("Sample normalized augment", sample=search_results[0])
-
-                self.search_cache.set(cache_key, search_results)
-            else:
-                debug_log("Search cache HIT", count=len(search_results))
-                self.stats["cache_hits"] += 1
-
-            if not search_results:
-                debug_log("!!! NO SEARCH RESULTS - returning empty response")
-                return self._build_response([])
-
-            # 3. Rank, filter, and return results (unified logic)
-            debug_log(">>> AUGMENT STRATEGY: Step 3 - Rank and build results", document_count=len(search_results))
-            return await self._rank_and_build_results(
-                query=query,
-                documents=search_results,
-                cache_key=cache_key,
-                augment_type=augment_type,
-                result_limit=result_limit,
-                stream_callback=stream_callback
-            )
-
-        except Exception as e:
-            debug_log("!!! AUGMENT STRATEGY ERROR", error=str(e), error_type=type(e).__name__)
-            import traceback
-            debug_log("Traceback", trace=traceback.format_exc())
-            return self._build_error_response("INTERNAL_ERROR", str(e))
-
-    async def _process_query_strategy(
-        self,
-        query: str,
-        augment_type: Optional[str],
-        domain: Optional[str],
-        capabilities: Optional[List[str]],
-        result_limit: int,
-        stream_callback: Optional[callable] = None
-    ) -> Dict[str, Any]:
-        """
-        Strategy 2: Query-Level Retrieval with Aggregation
-        Retrieve sample query documents and aggregate by agent.
-        """
-        try:
-            debug_log(">>> QUERY STRATEGY: Step 1 - Get embedding")
-            # 1. Get embedding (with cache)
-            if query not in self.embedding_cache:
-                debug_log("Embedding cache MISS - generating new embedding")
-                self.embedding_cache[query] = await self.llm_backend.get_embedding(query)
-                debug_log("Embedding generated", vector_length=len(self.embedding_cache[query]))
-            else:
-                debug_log("Embedding cache HIT")
-
-            vector = self.embedding_cache[query]
-
-            # 2. Search for relevant query documents and aggregate by agent
-            debug_log(">>> QUERY STRATEGY: Step 2 - Search for query docs", search_top_k=SETTINGS["search_top_k"] * 2)
-            cache_key = hashlib.md5((query + "_query_strategy").encode()).hexdigest()
-            search_results = self.search_cache.get(cache_key)
-
-            if search_results is None:
-                debug_log("Search cache MISS - calling search backend")
-                self.stats["cache_misses"] += 1
-                # Retrieve more documents since we need to aggregate
-                raw_query_docs = await self.search_backend.search(
-                    query, vector, SETTINGS["search_top_k"] * 2, strategy="query"
-                )
-                debug_log("Search backend returned query docs", count=len(raw_query_docs) if raw_query_docs else 0)
-                if raw_query_docs:
-                    debug_log("Sample raw query doc", sample=raw_query_docs[0])
-
-                # Aggregate query documents by agent - produces same format as normalized augments
-                debug_log(">>> QUERY STRATEGY: Step 2b - Aggregate by augment")
-                search_results = self._aggregate_by_augment(raw_query_docs)
-                debug_log("Aggregated augments", count=len(search_results))
-                if search_results:
-                    debug_log("Sample aggregated augment", sample=search_results[0])
-
-                self.search_cache.set(cache_key, search_results)
-            else:
-                debug_log("Search cache HIT", count=len(search_results))
-                self.stats["cache_hits"] += 1
-
-            if not search_results:
-                debug_log("!!! NO SEARCH RESULTS - returning empty response")
-                return self._build_response([])
-
-            # 3. Rank, filter, and return results (unified logic - same as augment strategy)
-            debug_log(">>> QUERY STRATEGY: Step 3 - Rank and build results", document_count=len(search_results))
-            return await self._rank_and_build_results(
-                query=query,
-                documents=search_results,
-                cache_key=cache_key,
-                augment_type=augment_type,
-                result_limit=result_limit,
-                stream_callback=stream_callback
-            )
-
-        except Exception as e:
-            debug_log("!!! QUERY STRATEGY ERROR", error=str(e), error_type=type(e).__name__)
-            import traceback
-            debug_log("Traceback", trace=traceback.format_exc())
-            return self._build_error_response("INTERNAL_ERROR", str(e))
+    def _normalize_augments(self, augment_docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out = []
+        for doc in augment_docs:
+            out.append({
+                "augment_id": doc.get("url"),
+                "augment_name": doc.get("name", "Unknown"),
+                "augment_url": doc.get("url"),
+                "augment_json_ld": doc.get("json_ld", "{}"),
+                "augment_description": doc.get("description", ""),
+                "matched_queries": [],
+            })
+        return out
 
     def _aggregate_by_augment(self, query_docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Aggregate query documents by augment_id.
-
-        Args:
-            query_docs: List of query documents from search
-
-        Returns:
-            List of aggregated agent objects
-        """
-        augments = {}
-
+        augments: Dict[str, Dict[str, Any]] = {}
         for doc in query_docs:
-            # Extract augment_id from metadata
-            # Assume query docs have augment_id, augment_name, etc in metadata
             augment_id = doc.get("augment_id") or doc.get("url")
             if not augment_id:
                 continue
-
             if augment_id not in augments:
                 augments[augment_id] = {
                     "augment_id": augment_id,
@@ -374,750 +383,330 @@ class WHOHandler:
                     "augment_json_ld": doc.get("augment_json_ld", doc.get("json_ld", "{}")),
                     "augment_description": doc.get("augment_description", doc.get("description", "")),
                     "matched_queries": [],
-                    "max_score": 0
+                    "max_score": 0,
                 }
-
-            # Add matched query
-            query_text = doc.get("query", doc.get("name", ""))
-            query_detail = doc.get("query_detail", doc.get("description", ""))
-            query_score = doc.get("@search.score", 0)
-
+            score = doc.get("@search.score", 0)
             augments[augment_id]["matched_queries"].append({
-                "query": query_text,
-                "detail": query_detail,
-                "score": query_score
+                "query": doc.get("query", doc.get("name", "")),
+                "detail": doc.get("query_detail", doc.get("description", "")),
+                "score": score,
             })
+            augments[augment_id]["max_score"] = max(augments[augment_id]["max_score"], score)
 
-            # Track max score
-            augments[augment_id]["max_score"] = max(
-                augments[augment_id]["max_score"],
-                query_score
-            )
+        ordered = sorted(augments.values(), key=lambda a: a["max_score"], reverse=True)
+        for a in ordered:
+            a["matched_queries"].sort(key=lambda q: q.get("score", 0), reverse=True)
+        return ordered
 
-        # Sort augments by max score
-        sorted_agents = sorted(
-            augments.values(),
-            key=lambda a: a["max_score"],
-            reverse=True
-        )
-
-        # Sort matched_queries within each agent by score
-        for agent in sorted_agents:
-            agent["matched_queries"].sort(
-                key=lambda q: q.get("score", 0),
-                reverse=True
-            )
-
-        return sorted_agents
-
-    def _normalize_augment_documents(self, augment_docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Normalize augment documents to standard format.
-        Converts raw augment search results to the same format as aggregated augments.
-
-        Args:
-            augment_docs: List of augment documents from search
-
-        Returns:
-            List of normalized agent objects with standard fields
-        """
-        normalized = []
-
-        for doc in augment_docs:
-            normalized.append({
-                "augment_id": doc.get("url"),
-                "augment_name": doc.get("name", "Unknown"),
-                "augment_url": doc.get("url"),
-                "augment_json_ld": doc.get("json_ld", "{}"),
-                "augment_description": doc.get("description", ""),
-                "matched_queries": []  # Empty for augment strategy
-            })
-
-        return normalized
-
-    async def _rank_and_build_results(
-        self,
-        query: str,
-        documents: List[Dict[str, Any]],
-        cache_key: str,
-        augment_type: Optional[str],
-        result_limit: int,
-        stream_callback: Optional[callable] = None
-    ) -> Dict[str, Any]:
-        """
-        Unified ranking, filtering, and result building logic.
-        Used by both agent and query strategies.
-
-        Args:
-            query: The user's query
-            documents: List of normalized documents (augments)
-            cache_key: Cache key prefix
-            augment_type: Optional type filter
-            result_limit: Maximum number of results to return
-            stream_callback: Optional callback for streaming results
-
-        Returns:
-            Response dictionary with results
-        """
-        debug_log(">>> RANK_AND_BUILD: Step 1 - Create ranking tasks",
-                  total_documents=len(documents),
-                  score_threshold=SETTINGS["score_threshold"])
-
-        # 1. Rank documents in parallel
-        ranking_tasks = []
-        ranking_cache_hits = 0
-
-        for doc in documents:
-            rank_cache_key = (cache_key, doc["augment_id"])
-
-            # Check if already ranked
-            cached_ranking = self.ranking_cache.get(rank_cache_key)
-            if cached_ranking is not None:
-                ranking_cache_hits += 1
-                debug_log("Ranking cache HIT", augment_id=doc["augment_id"], cached_score=cached_ranking.get("score"))
-                continue
-
-            # Create ranking task
-            debug_log("Creating ranking task", augment_id=doc["augment_id"], augment_name=doc.get("augment_name"))
-            ranking_tasks.append(self._rank_document(query, doc, rank_cache_key))
-
-        debug_log("Ranking tasks created", new_tasks=len(ranking_tasks), cached=ranking_cache_hits)
-
-        # Execute ranking tasks with streaming support
-        if stream_callback and ranking_tasks:
-            # STREAMING MODE: Stream results as they complete
-            debug_log("Executing ranking tasks in STREAMING mode...")
-
-            # Create a document lookup by augment_id for quick access
-            doc_lookup = {doc["augment_id"]: doc for doc in documents}
-
-            for completed_task in asyncio.as_completed(ranking_tasks):
-                try:
-                    await completed_task
-
-                    # Process ALL documents to find newly completed ones
-                    for doc in documents:
-                        rank_cache_key = (cache_key, doc["augment_id"])
-                        ranking = self.ranking_cache.get(rank_cache_key)
-
-                        # Skip if not ranked yet or already streamed
-                        if not ranking or doc.get("_streamed"):
-                            continue
-
-                        # Mark as streamed
-                        doc["_streamed"] = True
-
-                        # Filter by score
-                        if ranking["score"] <= SETTINGS["score_threshold"]:
-                            debug_log("Filtered by SCORE (streaming)", augment_id=doc["augment_id"],
-                                    score=ranking["score"], threshold=SETTINGS["score_threshold"])
-                            continue
-
-                        # Build result
-                        augment = {
-                            "url": doc.get("augment_url", doc["augment_id"]),
-                            "name": doc["augment_name"],
-                            "json_ld": doc.get("augment_json_ld", "{}"),
-                            "description": doc.get("augment_description", "")
-                        }
-
-                        schema_type = self._extract_schema_type(augment)
-
-                        # Apply type filter if specified
-                        if augment_type and not self._matches_type(schema_type, augment_type):
-                            debug_log("Filtered by TYPE (streaming)", augment_id=doc["augment_id"],
-                                    schema_type=schema_type, required_type=augment_type)
-                            continue
-
-                        result = self._build_result_object(augment, ranking, schema_type)
-
-                        # Add matched queries if present
-                        if doc.get("matched_queries"):
-                            result["matched_queries"] = [
-                                {"query": mq["query"], "score": mq.get("score", 0)}
-                                for mq in doc["matched_queries"][:3]
-                            ]
-
-                        # Stream immediately
-                        debug_log("STREAMING result", augment_id=doc["augment_id"], score=ranking["score"])
-                        await stream_callback(result)
-
-                except Exception as e:
-                    debug_log("Ranking task FAILED", error=str(e))
-
-            # Return empty response - results already streamed
-            return self._build_response([])
-
-        else:
-            # NON-STREAMING MODE: Collect all results first
-            if ranking_tasks:
-                debug_log("Executing ranking tasks in NON-STREAMING mode...")
-                for completed_task in asyncio.as_completed(ranking_tasks):
-                    try:
-                        await completed_task
-                    except Exception as e:
-                        debug_log("Ranking task FAILED", error=str(e))
-
-            # 2. Collect and filter results
-            debug_log(">>> RANK_AND_BUILD: Step 2 - Collect and filter results")
-            final_results = []
-            filtered_by_score = 0
-            filtered_by_type = 0
-
-            for doc in documents:
-                rank_cache_key = (cache_key, doc["augment_id"])
-                ranking = self.ranking_cache.get(rank_cache_key)
-
-                debug_log("Processing document",
-                         augment_id=doc["augment_id"],
-                         augment_name=doc.get("augment_name"),
-                         has_ranking=ranking is not None,
-                         score=ranking.get("score") if ranking else None)
-
-                if ranking and ranking["score"] > SETTINGS["score_threshold"]:
-                    # Build augment object from document data
-                    augment = {
-                        "url": doc.get("augment_url", doc["augment_id"]),
-                        "name": doc["augment_name"],
-                        "json_ld": doc.get("augment_json_ld", "{}"),
-                        "description": doc.get("augment_description", "")
-                    }
-
-                    schema_type = self._extract_schema_type(augment)
-
-                    # Apply type filter if specified
-                    if augment_type and not self._matches_type(schema_type, augment_type):
-                        debug_log("Filtered by TYPE", augment_id=doc["augment_id"], schema_type=schema_type, required_type=augment_type)
-                        filtered_by_type += 1
-                        continue
-
-                    result = self._build_result_object(augment, ranking, schema_type)
-
-                    # Add matched queries for explainability (if present)
-                    if doc.get("matched_queries"):
-                        result["matched_queries"] = [
-                            {
-                                "query": mq["query"],
-                                "score": mq.get("score", 0)
-                            }
-                            for mq in doc["matched_queries"][:3]
-                        ]
-
-                    debug_log("Added to final results", augment_id=doc["augment_id"], score=ranking["score"])
-                    final_results.append(result)
-                elif ranking:
-                    debug_log("Filtered by SCORE", augment_id=doc["augment_id"], score=ranking["score"], threshold=SETTINGS["score_threshold"])
-                    filtered_by_score += 1
-                else:
-                    debug_log("No ranking found", augment_id=doc["augment_id"])
-
-            debug_log("Filtering complete",
-                      final_results_count=len(final_results),
-                      filtered_by_score=filtered_by_score,
-                      filtered_by_type=filtered_by_type)
-
-            # 3. Sort by score and return top results
-            debug_log(">>> RANK_AND_BUILD: Step 3 - Sort and limit results")
-            final_results.sort(key=lambda x: x["score"], reverse=True)
-            top_results = final_results[:result_limit]
-
-            debug_log("Top results selected",
-                      top_count=len(top_results),
-                      result_limit=result_limit,
-                      top_scores=[r["score"] for r in top_results[:5]] if top_results else [])
-
-        # Update statistics
-        self.stats["total_sites_ranked"] += len(ranking_tasks)
-
-        return self._build_response(top_results)
-
-    async def _rank_document(self, query: str, doc: Dict[str, Any], cache_key: Tuple) -> bool:
-        """
-        Unified ranking function for both strategies.
-        Ranks a document (agent or aggregated agent) and caches the result.
-
-        Args:
-            query: The user's query
-            doc: Document to rank (normalized format)
-            cache_key: Cache key for storing the ranking
-
-        Returns:
-            True if ranking was successful
-        """
+    async def _rank_doc(self, query: str, doc: Dict[str, Any], cache_key: Tuple) -> None:
         try:
-            debug_log("  >> Ranking document", augment_id=doc.get("augment_id"), augment_name=doc.get("augment_name"))
-
-            # Build ranking context based on available information
             if doc.get("matched_queries"):
-                # Query strategy: use matched queries as context
-                debug_log("  >> Using QUERY STRATEGY ranking (matched queries)",
-                         matched_count=len(doc["matched_queries"]))
                 context = {
                     "name": doc["augment_name"],
                     "matched_capabilities": [
-                        {
-                            "capability": mq["query"],
-                            "description": mq.get("detail", "")
-                        }
+                        {"capability": mq["query"], "description": mq.get("detail", "")}
                         for mq in doc["matched_queries"][:5]
-                    ]
+                    ],
                 }
-                ranking_input = json.dumps(context, indent=2)
-                debug_log("  >> Ranking input (first 200 chars)", input=ranking_input[:200])
+                ranking_input = json.dumps(context)
             else:
-                # Augment strategy: use description as context
-                debug_log("  >> Using AUGMENT STRATEGY ranking (description)")
                 ranking_input = doc.get("augment_description", "") or doc.get("augment_json_ld", "{}")
-                debug_log("  >> Ranking input (first 200 chars)", input=ranking_input[:200] if ranking_input else "EMPTY")
-
-            # Get ranking from LLM
-            debug_log("  >> Calling LLM backend for ranking...")
             ranking = await self.llm_backend.rank_augment(query, ranking_input)
-            debug_log("  >> LLM ranking received", score=ranking.get("score"), description=ranking.get("description")[:100] if ranking.get("description") else None)
-
-            # Cache the result
             self.ranking_cache.set(cache_key, ranking)
-
-            return True
         except Exception as e:
-            debug_log("  !! Ranking FAILED", augment_id=doc.get("augment_id"), error=str(e), error_type=type(e).__name__)
-            return False
+            debug_log("Ranking failed", augment_id=doc.get("augment_id"), error=str(e))
+            self.ranking_cache.set(cache_key, {"score": 0, "description": f"Ranking failed: {str(e)[:50]}"})
 
-    async def _rank_aggregated_augment(self, query: str, agent: Dict[str, Any], cache_key: Tuple) -> bool:
+    async def _retrieve_and_rank(self, query: str, strategy: str) -> List[Dict[str, Any]]:
+        """Retrieve candidates and attach an LLM relevance ranking to each.
+
+        Returns docs with a `_ranking` dict attached, sorted by score descending.
         """
-        Rank an aggregated agent using its matched queries as context.
+        docs, cache_key = await self._retrieve(query, strategy, SETTINGS["search_top_k"])
+        if not docs:
+            return []
 
-        Args:
-            query: The user's query
-            agent: Aggregated agent object
-            cache_key: Cache key for storing the ranking
+        tasks = []
+        for doc in docs:
+            rk = (cache_key, doc["augment_id"])
+            if self.ranking_cache.get(rk) is None:
+                tasks.append(self._rank_doc(query, doc, rk))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self.stats["total_ranked"] += len(tasks)
 
-        Returns:
-            True if ranking was successful
-        """
-        try:
-            # Build ranking context from matched queries (top 5)
-            context = {
-                "name": agent["augment_name"],
-                "matched_capabilities": [
-                    {
-                        "capability": mq["query"],
-                        "description": mq.get("detail", "")
-                    }
-                    for mq in agent["matched_queries"][:5]
-                ]
-            }
+        for doc in docs:
+            doc["_ranking"] = self.ranking_cache.get((cache_key, doc["augment_id"])) or {"score": 0}
+        docs.sort(key=lambda d: d["_ranking"].get("score", 0), reverse=True)
+        return docs
 
-            # Get ranking from LLM
-            ranking = await self.llm_backend.rank_augment(query, json.dumps(context, indent=2))
+    # ----- public operations -----
 
-            # Cache the result
-            self.ranking_cache.set(cache_key, ranking)
+    async def search(
+        self,
+        text: str,
+        filt: Optional[Dict[str, Any]] = None,
+        federation: str = "auto",
+        page_size: Optional[int] = None,
+        page_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """POST /search (§7.2). `text` is required."""
+        self.stats["queries_processed"] += 1
+        if not text or not text.strip():
+            raise AgentFinderError("INVALID_ARGUMENT", "query.text is required for search")
+        if federation not in ("auto", "referrals", "none"):
+            raise AgentFinderError("INVALID_ARGUMENT", f"Unknown federation mode: {federation}")
 
-            return True
+        limit = page_size if page_size is not None else SETTINGS["max_results"]
+        offset = _decode_page_token(page_token)
+        source = SETTINGS["source"]
 
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
+        docs = await self._retrieve_and_rank(text.strip(), SETTINGS["default_strategy"])
+        entries = []
+        for doc in docs:
+            ranking = doc["_ranking"]
+            if ranking.get("score", 0) <= SETTINGS["score_threshold"]:
+                continue
+            entry = _to_catalog_entry(doc, ranking, source)
+            if _matches_filter(entry, filt):
+                entries.append(entry)
 
-            # Cache error result to avoid retrying
-            self.ranking_cache.set(cache_key, {
-                "score": 0,
-                "description": f"Ranking failed: {str(e)[:50]}"
-            })
+        # Federation: merge upstream results when in auto mode (§8).
+        if federation == "auto" and UPSTREAMS:
+            upstream = await self._federate(text, filt, page_size)
+            entries.extend(upstream)
+            entries.sort(key=lambda e: e.get("score", 0), reverse=True)
 
-            return False
+        page = entries[offset:offset + limit]
+        response: Dict[str, Any] = {"results": page}
 
-    def _extract_schema_type(self, augment: Dict[str, Any]) -> str:
-        """Extract @type from json_ld if available"""
-        schema_type = "Site"  # Default type
-        try:
-            json_ld_data = json.loads(augment.get("json_ld", "{}"))
-            if isinstance(json_ld_data, dict):
-                schema_type = json_ld_data.get("@type", "Site")
-            elif isinstance(json_ld_data, list) and json_ld_data:
-                schema_type = json_ld_data[0].get("@type", "Site")
-        except:
-            pass  # Use default if parsing fails
-        return schema_type
+        if federation == "referrals" and UPSTREAMS:
+            response["referrals"] = [
+                {k: r[k] for k in ("identifier", "displayName", "type", "url") if k in r}
+                for r in UPSTREAMS
+            ]
 
-    def _matches_type(self, schema_type: str, augment_type: str) -> bool:
-        """Check if schema type matches the requested augment type filter"""
-        # Map /who protocol types to schema types (per specification Section 3.1)
-        type_mappings = {
-            "A2AAgent": ["A2AAgent", "Agent"],
-            "MCPTool": ["MCPTool", "Tool"],
-            "MCPServer": ["MCPServer", "Server"],
-            "Skill": ["Skill", "AgentSkill"],
-            "OpenAPIService": ["OpenAPIService", "API"],
-        }
-        allowed_types = type_mappings.get(augment_type, [augment_type])
-        return schema_type in allowed_types
-
-    def _build_result_object(self, augment: Dict[str, Any], ranking: Dict[str, Any], schema_type: str) -> Dict[str, Any]:
-        """
-        Build a result object per /who protocol specification (Section 5).
-
-        Returns:
-            Dict with protocol, endpoint, score, and definition fields
-        """
-        # Parse json_ld to get protocol-specific information
-        try:
-            json_ld_data = json.loads(augment.get("json_ld", "{}"))
-        except:
-            json_ld_data = {}
-
-        # Determine protocol based on schema type (Section 5.1)
-        protocol = "http"  # Default fallback
-        if schema_type in ["MCPTool", "MCPServer"]:
-            protocol = "mcp"
-        elif schema_type in ["A2AAgent"]:
-            protocol = "a2a"
-        elif schema_type in ["Skill", "AgentSkill"]:
-            protocol = "skill"
-        elif schema_type in ["OpenAPIService", "API"]:
-            protocol = "openapi"
-
-        # Build endpoint URL
-        endpoint = augment["url"]
-
-        # Build definition object based on protocol (Section 5.2)
-        definition = self._build_definition(protocol, augment, ranking, json_ld_data)
-
-        result = {
-            "protocol": protocol,
-            "endpoint": endpoint,
-            "score": ranking["score"],
-            "definition": definition
-        }
-
-        # Add source field if available (Section 11.3)
-        if augment.get("source"):
-            result["source"] = augment["source"]
-
-        return result
-
-    def _build_definition(self, protocol: str, augment: Dict[str, Any], ranking: Dict[str, Any], json_ld_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Build protocol-specific definition object (Section 5.2).
-
-        The definition field contains the native metadata format for the protocol:
-        - mcp: MCP server info + tools array (per tools/list)
-        - a2a: Native A2A Agent Card
-        - openapi: OpenAPI spec reference
-        - skill: Agent Skill frontmatter (per agentskills.io spec)
-        - http: Custom HTTP invocation details
-        """
-        if protocol == "a2a":
-            # A2A Agent Card format (Section 5.2)
-            definition = {
-                "name": augment["name"],
-                "description": ranking.get("description", augment.get("description", "")),
-                "url": augment["url"],
-                "version": json_ld_data.get("version", "1.0.0"),
-            }
-
-            # Add capabilities if present
-            if "capabilities" in json_ld_data:
-                definition["capabilities"] = json_ld_data["capabilities"]
-
-            # Add skills array if present
-            if "skills" in json_ld_data:
-                definition["skills"] = json_ld_data["skills"]
-            elif "potentialAction" in json_ld_data:
-                # Convert potentialAction to skills format
-                actions = json_ld_data["potentialAction"]
-                if isinstance(actions, list):
-                    definition["skills"] = [
-                        {
-                            "id": a.get("@type", "").lower(),
-                            "name": a.get("name", ""),
-                            "description": a.get("description", ""),
-                            "examples": a.get("examples", [])
-                        }
-                        for a in actions if isinstance(a, dict)
-                    ]
-
-            return definition
-
-        elif protocol == "mcp":
-            # MCP server format with tools array (Section 5.2)
-            definition = {
-                "name": augment["name"],
-                "description": ranking.get("description", augment.get("description", "")),
-                "tools": []
-            }
-
-            # Add tools if present in json_ld
-            if "tools" in json_ld_data:
-                definition["tools"] = json_ld_data["tools"]
-
-            # Add version if present
-            if "version" in json_ld_data:
-                definition["version"] = json_ld_data["version"]
-
-            return definition
-
-        elif protocol == "skill":
-            # Agent Skill frontmatter format (Section 5.2)
-            definition = {
-                "name": json_ld_data.get("name", augment["name"]),
-                "description": ranking.get("description", augment.get("description", "")),
-            }
-
-            # Add optional skill fields
-            for field in ["license", "compatibility", "allowed-tools", "metadata"]:
-                if field in json_ld_data:
-                    definition[field] = json_ld_data[field]
-
-            return definition
-
-        elif protocol == "openapi":
-            # OpenAPI spec reference (Section 5.2)
-            definition = {
-                "name": augment["name"],
-                "description": ranking.get("description", augment.get("description", "")),
-                "specUrl": json_ld_data.get("specUrl", augment["url"] + "/openapi.json")
-            }
-
-            return definition
-
-        else:
-            # Custom HTTP endpoint (Section 5.2)
-            definition = {
-                "name": augment["name"],
-                "description": ranking.get("description", augment.get("description", "")),
-                "method": json_ld_data.get("method", "POST"),
-                "contentType": json_ld_data.get("contentType", "application/json"),
-            }
-
-            # Add inputSchema if present
-            if "inputSchema" in json_ld_data:
-                definition["inputSchema"] = json_ld_data["inputSchema"]
-
-            # Add authentication if present
-            if "authentication" in json_ld_data:
-                definition["authentication"] = json_ld_data["authentication"]
-
-            return definition
-
-    def _build_response(self, results: List[Dict[str, Any]], referrals: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-        """
-        Build a successful /who protocol response (Section 6.1).
-
-        Args:
-            results: List of ranked augment results
-            referrals: Optional list of referrals to other Who servers (Section 11.4)
-
-        Returns:
-            Dict with _meta and results per specification
-        """
-        response = {
-            "_meta": {
-                "response_type": "answer",
-                "version": WHO_PROTOCOL_VERSION,
-                "result_count": len(results)
-            },
-            "results": results
-        }
-
-        # Add referrals if provided (Section 11.4)
-        if referrals:
-            response["referrals"] = referrals
-
+        if offset + limit < len(entries):
+            response["pageToken"] = _encode_page_token(offset + limit)
         return response
 
-    def _build_error_response(self, error_code: str, message: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Build an error /who protocol response.
+    async def explore(
+        self,
+        text: Optional[str],
+        filt: Optional[Dict[str, Any]],
+        facets: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """POST /explore (§7.3). Returns facet aggregations over the matched set."""
+        self.stats["queries_processed"] += 1
+        if not facets:
+            raise AgentFinderError("INVALID_ARGUMENT", "resultType.facets is required for explore")
 
-        Args:
-            error_code: One of INVALID_QUERY, NO_RESULTS, RATE_LIMITED, INTERNAL_ERROR
-            message: Optional detailed error message
+        source = SETTINGS["source"]
+        if text and text.strip():
+            docs = await self._retrieve_and_rank(text.strip(), SETTINGS["default_strategy"])
+            entries = []
+            for doc in docs:
+                if doc["_ranking"].get("score", 0) <= SETTINGS["score_threshold"]:
+                    continue
+                entry = _to_catalog_entry(doc, doc["_ranking"], source)
+                if _matches_filter(entry, filt):
+                    entries.append(entry)
+        else:
+            # No text: aggregate over the whole registry, narrowed by filter only.
+            raw = await self.search_backend.list_all(SETTINGS["list_top_k"])
+            entries = [
+                e for e in (_to_catalog_entry(d, None, source) for d in self._normalize_augments(raw))
+                if _matches_filter(e, filt)
+            ]
 
-        Returns:
-            Dict with _meta and error per specification
-        """
-        return {
-            "_meta": {
-                "response_type": "failure",
-                "version": WHO_PROTOCOL_VERSION
-            },
-            "error": {
-                "code": error_code,
-                "message": message or ERROR_CODES.get(error_code, "Unknown error")
-            }
-        }
+        result_facets: Dict[str, Any] = {}
+        for spec in facets:
+            field = spec.get("field")
+            if not field:
+                continue
+            limit = spec.get("limit", 20)
+            min_count = spec.get("minCount", 0)
+            counts: Dict[str, int] = {}
+            for entry in entries:
+                for val in set(str(v) for v in _values_at_path(entry, field)):
+                    counts[val] = counts.get(val, 0) + 1
+            ordered = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+            kept = [(v, c) for v, c in ordered if c >= min_count]
+            buckets = [{"value": v, "count": c} for v, c in kept[:limit]]
+            other = sum(c for _, c in kept[limit:])
+            facet_out: Dict[str, Any] = {"buckets": buckets}
+            if other:
+                facet_out["otherCount"] = other
+            result_facets[field] = facet_out
 
-    async def _rank_site(self, query: str, augment: Dict[str, Any], cache_key: Tuple) -> bool:
-        """
-        Rank a single augment and cache the result.
+        return {"resultType": "facets", "facets": result_facets}
 
-        Args:
-            query: The user's query
-            augment: Site information dictionary
-            cache_key: Cache key for storing the ranking
+    async def list_agents(
+        self,
+        filters: Dict[str, str],
+        order_by: Optional[str] = None,
+        page_size: int = 20,
+        page_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """GET /agents (§7.4). Deterministic browsing; no relevance sorting."""
+        page_size = max(1, min(page_size, 100))
+        offset = _decode_page_token(page_token)
+        source = SETTINGS["source"]
 
-        Returns:
-            True if ranking was successful
-        """
-        try:
-            # Get ranking from LLM using description field
-            augment_description = augment.get("description", "") or augment.get("json_ld", "{}")
-            ranking = await self.llm_backend.rank_augment(query, augment_description)
+        raw = await self.search_backend.list_all(SETTINGS["list_top_k"])
+        entries = [_to_catalog_entry(d, None, source) for d in self._normalize_augments(raw)]
 
-            # Cache the result
-            self.ranking_cache.set(cache_key, ranking)
+        # Appendix A scalar filters
+        entries = [e for e in entries if self._matches_list_filters(e, filters)]
 
-            return True
+        if order_by:
+            entries = self._apply_order_by(entries, order_by)
+        else:
+            entries.sort(key=lambda e: e.get("displayName", "").lower())
 
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
+        page = entries[offset:offset + page_size]
+        response: Dict[str, Any] = {"results": page}
+        if offset + page_size < len(entries):
+            response["pageToken"] = _encode_page_token(offset + page_size)
+        return response
 
-            # Cache error result to avoid retrying
-            self.ranking_cache.set(cache_key, {
-                "score": 0,
-                "description": f"Ranking failed: {str(e)[:50]}"
-            })
-
+    def _matches_list_filters(self, entry: Dict[str, Any], filters: Dict[str, str]) -> bool:
+        name = filters.get("displayName")
+        if name and name.lower() not in entry.get("displayName", "").lower():
             return False
+        types = filters.get("type")
+        if types and entry.get("type") not in [t.strip() for t in types.split(",")]:
+            return False
+        pubs = filters.get("publisherId")
+        if pubs:
+            pub = publisher_from_identifier(entry.get("identifier", ""))
+            if pub not in [p.strip() for p in pubs.split(",")]:
+                return False
+        created_after = filters.get("createdAfter")
+        if created_after and entry.get("updatedAt", "") < created_after:
+            return False
+        updated_after = filters.get("updatedAfter")
+        if updated_after and entry.get("updatedAt", "") < updated_after:
+            return False
+        return True
+
+    def _apply_order_by(self, entries: List[Dict[str, Any]], order_by: str) -> List[Dict[str, Any]]:
+        field = order_by.strip()
+        reverse = False
+        if " " in field:
+            field, direction = field.split(None, 1)
+            reverse = direction.strip().upper() == "DESC"
+        field_map = {"name": "displayName", "created_at": "updatedAt"}
+        key = field_map.get(field, field)
+        return sorted(entries, key=lambda e: str(e.get(key, "")).lower(), reverse=reverse)
+
+    # ----- federation (§8) -----
+
+    async def _federate(self, text: str, filt: Optional[Dict[str, Any]], page_size: Optional[int]) -> List[Dict[str, Any]]:
+        """Query upstream registries (auto mode) and return their merged results."""
+        if self.http_session is None:
+            import aiohttp
+            self.http_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=SETTINGS["federation_timeout"])
+            )
+
+        query_obj: Dict[str, Any] = {"text": text}
+        if filt:
+            query_obj["filter"] = filt
+        body = {"query": query_obj, "federation": "none"}
+        if page_size is not None:
+            body["pageSize"] = page_size
+
+        async def call(reg: Dict[str, str]) -> List[Dict[str, Any]]:
+            try:
+                async with self.http_session.post(reg["url"], json=body) as resp:
+                    if resp.status != 200:
+                        return []
+                    data = await resp.json()
+                    results = data.get("results", []) if isinstance(data, dict) else []
+                    for r in results:
+                        r.setdefault("source", reg["url"])
+                    return results
+            except Exception as e:
+                debug_log("Federation call failed", url=reg.get("url"), error=str(e))
+                return []
+
+        merged: List[Dict[str, Any]] = []
+        for batch in await asyncio.gather(*[call(r) for r in UPSTREAMS], return_exceptions=True):
+            if isinstance(batch, list):
+                merged.extend(batch)
+        return merged
+
+    # ----- admin -----
 
     async def get_stats(self) -> Dict[str, Any]:
-        """Get handler statistics"""
         return {
             **self.stats,
+            "spec_version": SPEC_VERSION,
+            "upstream_registries": len(UPSTREAMS),
             "embedding_cache_size": len(self.embedding_cache),
             "search_cache_size": self.search_cache.size(),
             "ranking_cache_size": self.ranking_cache.size(),
         }
 
     async def clear_caches(self):
-        """Clear all caches"""
         self.embedding_cache.clear()
         self.search_cache.clear()
         self.ranking_cache.clear()
 
     async def cleanup(self):
-        """Cleanup resources"""
-
-        # Cleanup backends
-        cleanup_tasks = []
+        tasks = []
         if self.search_backend:
-            cleanup_tasks.append(self.search_backend.close())
+            tasks.append(self.search_backend.close())
         if self.llm_backend:
-            cleanup_tasks.append(self.llm_backend.close())
+            tasks.append(self.llm_backend.close())
+        if self.http_session:
+            tasks.append(self.http_session.close())
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
-        if cleanup_tasks:
-            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 
-# Global handler instance
-_handler: Optional[WHOHandler] = None
+# ========== Module-level singleton + entry points ==========
 
-async def get_handler() -> WHOHandler:
-    """Get or create the global handler instance"""
+_handler: Optional[AgentFinderHandler] = None
+
+
+async def get_handler() -> AgentFinderHandler:
     global _handler
     if _handler is None:
-        _handler = WHOHandler()
+        _handler = AgentFinderHandler()
         await _handler.initialize()
     return _handler
 
-async def who_query(
-    query: str,
-    augment_type: Optional[str] = None,
-    domain: Optional[str] = None,
-    capabilities: Optional[List[str]] = None,
-    max_results: Optional[int] = None,
-    retrieval_strategy: str = "agent",
-    ranking_model: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Main entry point for WHO queries per /who protocol (Section 3).
 
-    Args:
-        query: Natural language description of the need
-        augment_type: Filter by augment type (e.g., "A2AAgent", "MCPTool", "Skill")
-        domain: Filter by domain (e.g., "recipes", "travel", "finance")
-        capabilities: Array of required capabilities
-        max_results: Maximum number of results to return
-        retrieval_strategy: "agent" (Strategy 1) or "query" (Strategy 2)
-        ranking_model: LLM model to use for ranking (e.g., "gpt-4.1", "gpt-4.1-mini")
-
-    Returns:
-        Dict with _meta and results per /who protocol specification (Section 6)
-    """
-    if not query or not query.strip():
-        # Return error response for empty query
-        return {
-            "_meta": {
-                "response_type": "failure",
-                "version": WHO_PROTOCOL_VERSION
-            },
-            "error": {
-                "code": "INVALID_QUERY",
-                "message": "Query text is required"
-            }
-        }
-
+async def search(text: str, filt: Optional[Dict[str, Any]] = None, federation: str = "auto",
+                 page_size: Optional[int] = None, page_token: Optional[str] = None) -> Dict[str, Any]:
     handler = await get_handler()
-    return await handler.process_query(
-        query=query.strip(),
-        augment_type=augment_type,
-        domain=domain,
-        capabilities=capabilities,
-        max_results=max_results,
-        retrieval_strategy=retrieval_strategy
-    )
+    return await handler.search(text, filt, federation, page_size, page_token)
 
-async def who_query_stream(
-    query: str,
-    augment_type: Optional[str] = None,
-    domain: Optional[str] = None,
-    capabilities: Optional[List[str]] = None,
-    max_results: Optional[int] = None,
-    retrieval_strategy: str = "query",
-    ranking_model: Optional[str] = None,
-    stream_callback: Optional[callable] = None
-):
-    """
-    Streaming version of who_query that calls a callback for each result as it completes.
 
-    Args:
-        query: Natural language description of the need
-        augment_type: Filter by augment type
-        domain: Filter by domain
-        capabilities: Array of required capabilities
-        max_results: Maximum number of results to return
-        retrieval_strategy: "agent" or "query" (query is better for streaming)
-        ranking_model: LLM model to use for ranking
-        stream_callback: Async function to call with each result as it completes
-    """
-    if not query or not query.strip():
-        return
-
+async def explore(text: Optional[str], filt: Optional[Dict[str, Any]], facets: List[Dict[str, Any]]) -> Dict[str, Any]:
     handler = await get_handler()
-    await handler.process_query_stream(
-        query=query.strip(),
-        augment_type=augment_type,
-        domain=domain,
-        capabilities=capabilities,
-        max_results=max_results,
-        retrieval_strategy=retrieval_strategy,
-        stream_callback=stream_callback
-    )
+    return await handler.explore(text, filt, facets)
+
+
+async def list_agents(filters: Dict[str, str], order_by: Optional[str] = None,
+                      page_size: int = 20, page_token: Optional[str] = None) -> Dict[str, Any]:
+    handler = await get_handler()
+    return await handler.list_agents(filters, order_by, page_size, page_token)
+
 
 async def get_stats() -> Dict[str, Any]:
-    """Get handler statistics"""
     handler = await get_handler()
     return await handler.get_stats()
 
+
 async def clear_caches():
-    """Clear all caches"""
     handler = await get_handler()
     await handler.clear_caches()
 
+
 async def cleanup():
-    """Cleanup resources on shutdown"""
     global _handler
     if _handler:
         await _handler.cleanup()

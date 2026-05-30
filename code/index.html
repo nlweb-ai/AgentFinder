@@ -530,19 +530,16 @@
         `;
 
         try {
-          const selectedModel = document.getElementById('modelSelect').value;
-          const response = await fetch('/who', {
+          const requestBody = {
+            query: { text: query },
+            federation: 'none'
+          };
+          const response = await fetch('/search', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
             },
-            body: JSON.stringify({
-              query,
-              meta: {
-                strategy: this.selectedStrategy,
-                ranking_model: selectedModel
-              }
-            })
+            body: JSON.stringify(requestBody)
           });
 
           if (!response.ok) {
@@ -553,17 +550,11 @@
 
           // Store the full protocol exchange for viewing
           this.lastProtocolExchange = {
-            request: {
-              query: query,
-              meta: {
-                strategy: this.selectedStrategy,
-                ranking_model: selectedModel
-              }
-            },
+            request: requestBody,
             response: data
           };
 
-          // Parse WHO protocol response
+          // Parse Agent Finder search response
           let results = [];
           if (data.results && Array.isArray(data.results)) {
             results = data.results;
@@ -614,10 +605,10 @@
           const rank = index + 1;
           const isTop3 = rank <= 3;
 
-          // Map WHO protocol response fields
-          const endpoint = result.endpoint || result.url || '';
-          const name = result.definition?.name || result.name || 'Unknown Agent';
-          const description = result.definition?.description || result.description || '';
+          // Map Agent Finder catalog entry fields
+          const endpoint = result.url || result.endpoint || '';
+          const name = result.displayName || result.name || 'Unknown Agent';
+          const description = result.description || '';
 
           html += `
             <div class="result-item">
@@ -633,12 +624,12 @@
                   ${this.escapeHtml(description)}
                 </div>
               ` : ''}
-              ${result.matched_queries && result.matched_queries.length > 0 ? `
+              ${result.representativeQueries && result.representativeQueries.length > 0 ? `
                 <div style="margin: 8px 0; padding: 8px; background: #f8f9fa; border-radius: 6px;">
-                  <small style="color: #666; font-weight: 600;">Matched Queries:</small>
-                  ${result.matched_queries.map(mq => `
+                  <small style="color: #666; font-weight: 600;">Representative Queries:</small>
+                  ${result.representativeQueries.map(q => `
                     <div style="margin: 4px 0; padding-left: 8px; border-left: 2px solid #7c4a3a; color: #666;">
-                      <small>${this.escapeHtml(mq.query)}</small>
+                      <small>${this.escapeHtml(q)}</small>
                     </div>
                   `).join('')}
                 </div>

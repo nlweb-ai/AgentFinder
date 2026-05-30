@@ -40,3 +40,31 @@ code/retrieval_strategies.html
 # Temporary files
 .DS_Store
 set_keys.sh
+
+# Embedding caches (derived artifacts; regenerated on first serve)
+**/.embeddings.pkl
+.agent_finder_cache/
+
+# Personal / large source data (not for distribution)
+data/m365/
+
+# Catalog build scratch (regenerable via scraper/dedup.py + scraper/enrich.py).
+# The distributable catalogs live at catalog/ and catalog_sample/ (checked in).
+data/catalog_5k/
+data/catalog_manifest/
+data/catalog_dedup/
+data/catalog_enriched/
+data/catalog_enriched2/
+data/var_*/
+data/coverage_cache/
+
+# Benchmark run outputs and caches
+results/
+**/enrich_cache.json
+**/eval_queries.json
+
+# Editor / agent / python scratch
+.vscode/
+.claude/
+**/__pycache__/
+debug_*.py

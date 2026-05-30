@@ -1,0 +1,28 @@
+# Example A/B benchmark config. Run with:
+#   python -m benchmarks.runner --config benchmarks/config.example.yaml
+# Any field can be overridden on the CLI (e.g. --seeds 5).
+
+# The subject agent. Choose ONE of:
+#   - a registered name:  stub | shell
+#   - your own adapter:   ./path/to/my_agent.py:make_agent
+# `args` are passed as kwargs to the factory.
+agent:
+  spec: shell
+  args:
+    # The shell adapter wraps any external agent CLI. The task prompt is sent on
+    # stdin; in the treatment arm a rendered augment block is appended to it.
+    command: "your-agent-cli --stdin"
+
+# The benchmark suite. Choose ONE of:
+#   - a registered name:  sample | jsonl
+#   - your own adapter:   ./path/to/appworld.py:make_benchmark
+benchmark:
+  spec: jsonl
+  args:
+    path: ./my_tasks.jsonl
+
+# A running Agent Finder instance (used only by the treatment arm).
+finder_url: http://127.0.0.1:8090
+
+# Arms to run and repeats per task. Both arms + multiple seeds = a real A/B.
+seeds: 3
